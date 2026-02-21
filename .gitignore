@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Local data/artifacts
+data/
+models/
+outputs/
+labels/*.csv
+
+# Local tooling
+.claude/
