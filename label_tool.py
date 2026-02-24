@@ -1,4 +1,4 @@
-"""Manual label tool for standing vs not-standing."""
+"""Manual labeling tool."""
 
 import argparse
 import csv
@@ -6,7 +6,20 @@ import os
 
 import cv2
 
-from config import LABELS_CSV, LABELS_POSTURE4_CSV, METADATA_CSV
+from config import LABELS_CSV, LABELS_POSTURE3_CSV, METADATA_CSV
+
+CLASS_SPECS = {
+    "binary": {
+        "csv": LABELS_CSV,
+        "prompt": "Keys: 1=standing, 0=not-standing, s=skip, q=quit",
+        "keys": {ord("0"): 0, ord("1"): 1},
+    },
+    "posture3": {
+        "csv": LABELS_POSTURE3_CSV,
+        "prompt": "Keys: 0=standing, 1=sitting, 2=lying, s=skip, q=quit",
+        "keys": {ord("0"): 0, ord("1"): 1, ord("2"): 2},
+    },
+}
 
 
 def load_metadata():
@@ -53,7 +66,8 @@ def main(args):
     if args.pig is not None:
         rows = [r for r in rows if int(r["pig_id"]) == args.pig]
 
-    labels_csv = LABELS_CSV if args.class_set == "binary" else LABELS_POSTURE4_CSV
+    spec = CLASS_SPECS[args.class_set]
+    labels_csv = spec["csv"]
 
     existing = load_existing_keys(labels_csv)
     rows = [r for r in rows if (r["timestamp_folder"], r["pig_id"]) not in existing]
@@ -72,10 +86,7 @@ def main(args):
             writer.writeheader()
 
         labeled = 0
-        if args.class_set == "binary":
-            print("Keys: 1=standing, 0=not-standing, s=skip, q=quit")
-        else:
-            print("Keys: 0=standing, 1=sitting, 2=lateral_lying, 3=sternal_lying, s=skip, q=quit")
+        print(spec["prompt"])
         for i, row in enumerate(rows, 1):
             path = pick_image_path(row, primary_key)
             if not path:
@@ -96,14 +107,8 @@ def main(args):
             label = None
             while True:
                 key = cv2.waitKey(0) & 0xFF
-                if key == ord("0"):
-                    label = 0
-                    break
-                if args.class_set == "binary" and key == ord("1"):
-                    label = 1
-                    break
-                if args.class_set == "posture4" and key in [ord("1"), ord("2"), ord("3")]:
-                    label = int(chr(key))
+                if key in spec["keys"]:
+                    label = spec["keys"][key]
                     break
                 if key == ord("s"):
                     label = -1
@@ -136,11 +141,11 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Label standing vs not-standing")
+    parser = argparse.ArgumentParser(description="Label posture classes")
     parser.add_argument("--pig", type=int, default=None)
     parser.add_argument("--show-ir", action="store_true")
     parser.add_argument("--show-depth", action="store_true")
-    parser.add_argument("--class-set", choices=["binary", "posture4"], default="binary")
+    parser.add_argument("--class-set", choices=["binary", "posture3"], default="binary")
     parser.add_argument("--present-only", action="store_true")
     parser.add_argument("--presence-csv", default=None)
     main(parser.parse_args())

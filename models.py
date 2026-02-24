@@ -41,31 +41,6 @@ class SingleModalModel(nn.Module):
         return self.classifier(x)
 
 
-class DualBranchModel(nn.Module):
-    def __init__(self, channels_a=3, channels_b=3, num_classes=2, pretrained=True):
-        super().__init__()
-        weights = models.MobileNet_V2_Weights.DEFAULT if pretrained else None
-        a = models.mobilenet_v2(weights=weights)
-        b = models.mobilenet_v2(weights=weights)
-        SingleModalModel._replace_first_conv(a, channels_a, pretrained)
-        SingleModalModel._replace_first_conv(b, channels_b, pretrained)
-        self.branch_a = a.features
-        self.branch_b = b.features
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(a.last_channel + b.last_channel, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, num_classes),
-        )
-
-    def forward(self, x_a, x_b):
-        f1 = self.pool(self.branch_a(x_a)).flatten(1)
-        f2 = self.pool(self.branch_b(x_b)).flatten(1)
-        return self.classifier(torch.cat([f1, f2], dim=1))
-
-
 def build_model(modality="rgb", num_classes=2, pretrained=True):
     from data_loader import MODALITY_CHANNELS
 

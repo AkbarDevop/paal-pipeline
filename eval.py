@@ -17,12 +17,18 @@ try:
 except ImportError:
     HAS_PLT = False
 
-from config import BATCH_SIZE, BINARY_CLASSES, POSTURE4_CLASSES, LABELS_CSV, MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS
+from config import BATCH_SIZE, BINARY_CLASSES, POSTURE3_CLASSES, LABELS_CSV, MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS
 from data_loader import MODALITY_CHANNELS, SowPostureDataset
 from models import SingleModalModel
 
 
-def evaluate_model(modality, device, args, class_names):
+def parse_allowed_labels(raw):
+    if not raw:
+        return None
+    return [int(x.strip()) for x in raw.split(",") if x.strip() != ""]
+
+
+def evaluate_model(modality, device, args, class_names, allowed_labels):
     model_path = os.path.join(MODEL_DIR, f"{args.model_prefix}_{modality}_best.pth")
     if not os.path.exists(model_path):
         print(f"  No model for '{modality}'")
@@ -37,7 +43,7 @@ def evaluate_model(modality, device, args, class_names):
 
     test_set = SowPostureDataset(
         modality=modality, labels_csv=args.labels_csv, pig_ids=TEST_PIG_IDS,
-        allowed_labels=None if not args.allowed_labels else [int(x) for x in args.allowed_labels.split(",")],
+        allowed_labels=allowed_labels,
         silent=True,
     )
     if len(test_set) == 0:
@@ -53,6 +59,14 @@ def evaluate_model(modality, device, args, class_names):
 
     preds, labels = np.array(preds), np.array(labels)
     label_ids = sorted(class_names.keys())
+    report_dict = classification_report(
+        labels, preds, labels=label_ids,
+        target_names=[class_names[i] for i in label_ids], zero_division=0, output_dict=True,
+    )
+    report_text = classification_report(
+        labels, preds, labels=label_ids,
+        target_names=[class_names[i] for i in label_ids], zero_division=0,
+    )
     return {
         "modality": modality,
         "accuracy": accuracy_score(labels, preds),
@@ -60,10 +74,8 @@ def evaluate_model(modality, device, args, class_names):
         "best_epoch": ckpt.get("epoch", "?"),
         "test_pigs": TEST_PIG_IDS,
         "confusion_matrix": confusion_matrix(labels, preds, labels=label_ids),
-        "report": classification_report(
-            labels, preds, labels=label_ids,
-            target_names=[class_names[i] for i in label_ids], zero_division=0,
-        ),
+        "report_text": report_text,
+        "report_dict": report_dict,
     }
 
 
@@ -98,6 +110,57 @@ def plot_training_curves(modality, model_prefix):
     plt.close()
 
 
+def plot_confusion_matrix(cm, class_names, modality, model_prefix):
+    if not HAS_PLT:
+        return
+    label_ids = sorted(class_names.keys())
+    names = [class_names[i] for i in label_ids]
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+    ax.figure.colorbar(im, ax=ax)
+    ax.set(
+        xticks=range(len(names)), yticks=range(len(names)),
+        xticklabels=names, yticklabels=names,
+        ylabel="True label", xlabel="Predicted label",
+        title=f"{modality} confusion matrix",
+    )
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    thresh = cm.max() / 2.0
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, str(cm[i, j]), ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, f"cm_{model_prefix}_{modality}.png"), dpi=150)
+    plt.close()
+
+
+def plot_per_class_accuracy(report_dict, class_names, modality, model_prefix):
+    if not HAS_PLT:
+        return
+    label_ids = sorted(class_names.keys())
+    names = [class_names[i] for i in label_ids]
+    precisions = [float(report_dict.get(name, {}).get("precision", 0.0)) for name in names]
+    recalls = [float(report_dict.get(name, {}).get("recall", 0.0)) for name in names]
+    f1s = [float(report_dict.get(name, {}).get("f1-score", 0.0)) for name in names]
+
+    x = np.arange(len(names))
+    width = 0.25
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x - width, [p * 100 for p in precisions], width, label="Precision")
+    ax.bar(x, [r * 100 for r in recalls], width, label="Recall")
+    ax.bar(x + width, [f * 100 for f in f1s], width, label="F1-score")
+    ax.set_ylim(0, 110)
+    ax.set_ylabel("Score (%)")
+    ax.set_title(f"{modality} per-class metrics")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=45, ha="right")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, f"per_class_{model_prefix}_{modality}.png"), dpi=150)
+    plt.close()
+
+
 def plot_comparison(results):
     if not HAS_PLT:
         return
@@ -120,15 +183,22 @@ def main(args):
     print(f"Device: {device}")
     print(f"Test pigs: {TEST_PIG_IDS}\n")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    class_names = BINARY_CLASSES if args.class_set == "binary" else POSTURE4_CLASSES
+    class_map = {"binary": BINARY_CLASSES, "posture3": POSTURE3_CLASSES}
+    base_class_names = class_map[args.class_set]
+    allowed_labels = parse_allowed_labels(args.allowed_labels)
+    if allowed_labels:
+        ids = sorted(set(allowed_labels))
+        class_names = {i: base_class_names.get(lbl, str(lbl)) for i, lbl in enumerate(ids)}
+    else:
+        class_names = base_class_names
 
     if args.modality:
         modalities = args.modality
     else:
         modalities = sorted(
-            x.replace("standing_", "").replace("_best.pth", "")
+            x.replace(f"{args.model_prefix}_", "").replace("_best.pth", "")
             for x in os.listdir(MODEL_DIR)
-            if x.startswith("standing_") and x.endswith("_best.pth")
+            if x.startswith(f"{args.model_prefix}_") and x.endswith("_best.pth")
         )
         modalities = [m for m in modalities if m in MODALITY_CHANNELS]
 
@@ -140,15 +210,17 @@ def main(args):
     results = []
     for m in modalities:
         print(f"== {m.upper()} ==")
-        r = evaluate_model(m, device, args, class_names)
+        r = evaluate_model(m, device, args, class_names, allowed_labels)
         if not r:
             print()
             continue
         results.append(r)
         print(f"Test accuracy: {r['accuracy']:.4f} ({r['n_test']} frames, best epoch {r['best_epoch']})")
         print(f"Confusion matrix:\n{r['confusion_matrix']}")
-        print(f"\n{r['report']}")
+        print(f"\n{r['report_text']}")
         plot_training_curves(m, args.model_prefix)
+        plot_confusion_matrix(r["confusion_matrix"], class_names, m, args.model_prefix)
+        plot_per_class_accuracy(r["report_dict"], class_names, m, args.model_prefix)
         print()
 
     if len(results) > 1:
@@ -179,8 +251,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate trained models")
     parser.add_argument("--modality", nargs="+", default=None)
-    parser.add_argument("--class-set", choices=["binary", "posture4"], default="binary")
-    parser.add_argument("--num-classes", type=int, default=2, choices=[2, 4])
+    parser.add_argument("--class-set", choices=["binary", "posture3"], default="binary")
+    parser.add_argument("--num-classes", type=int, default=2, choices=[2, 3])
     parser.add_argument("--labels-csv", default=LABELS_CSV)
     parser.add_argument("--model-prefix", default="standing")
     parser.add_argument("--allowed-labels", default=None)

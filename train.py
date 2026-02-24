@@ -21,6 +21,12 @@ from data_loader import get_dataloaders
 from models import build_model
 
 
+def parse_allowed_labels(raw):
+    if not raw:
+        return None
+    return [int(x.strip()) for x in raw.split(",") if x.strip() != ""]
+
+
 def run_epoch(model, loader, criterion, device, optimizer=None):
     train_mode = optimizer is not None
     model.train() if train_mode else model.eval()
@@ -58,7 +64,7 @@ def main(args):
         modality=args.modality,
         batch_size=args.batch,
         labels_csv=args.labels_csv,
-        allowed_labels=None if not args.allowed_labels else [int(x) for x in args.allowed_labels.split(",")],
+        allowed_labels=parse_allowed_labels(args.allowed_labels),
     )
 
     model = build_model(modality=args.modality, num_classes=args.num_classes, pretrained=True).to(device)
@@ -130,13 +136,13 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train standing classifier")
+    parser = argparse.ArgumentParser(description="Train posture classifier")
     parser.add_argument("--modality", default="rgb", choices=["rgb", "ir", "depth", "rgb_depth", "rgb_ir", "all"])
-    parser.add_argument("--num-classes", type=int, default=2, choices=[2, 4])
+    parser.add_argument("--num-classes", type=int, default=2, choices=[2, 3])
     parser.add_argument("--labels-csv", default=LABELS_CSV)
     parser.add_argument("--model-prefix", default="standing")
     parser.add_argument("--allowed-labels", default=None,
-                        help="Comma-separated label ids to include, e.g. 0,1,2,3")
+                        help="Comma-separated label ids to include, e.g. 0,1,2")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--batch", type=int, default=BATCH_SIZE)

@@ -7,7 +7,7 @@ import re
 from config import DATA_DIR, LABEL_DIR, METADATA_CSV
 
 
-PATTERN = re.compile(r"^pig(\d+)_(depth_vis|depth|ir_vis|ir|rgb_aligned|rgb)_(\d{8}-\d{2}-\d{2}-\d{2})\.(jpg|raw)$")
+PATTERN = re.compile(r"^pig(\d+)_(depth_vis|depth|ir_vis|ir|rgb)_(\d{8}-\d{2}-\d{2}-\d{2})\.(jpg|raw)$")
 
 
 def parse_filename(name):
@@ -45,7 +45,6 @@ def scan_data():
                     "pig_id": parsed["pig_id"],
                     "pig_timestamp": parsed["timestamp"],
                     "rgb_jpg": "",
-                    "rgb_aligned_jpg": "",
                     "ir_jpg": "",
                     "depth_jpg": "",
                     "rgb_raw": "",
@@ -55,9 +54,7 @@ def scan_data():
 
             path = os.path.join(folder_path, fname)
             mod, ext = parsed["modality"], parsed["ext"]
-            if mod == "rgb_aligned" and ext == "jpg":
-                records[key]["rgb_aligned_jpg"] = path
-            elif mod == "rgb" and ext == "jpg":
+            if mod == "rgb" and ext == "jpg":
                 records[key]["rgb_jpg"] = path
             elif mod == "rgb" and ext == "raw":
                 records[key]["rgb_raw"] = path
@@ -76,7 +73,6 @@ def scan_data():
         "pig_id",
         "pig_timestamp",
         "rgb_jpg",
-        "rgb_aligned_jpg",
         "ir_jpg",
         "depth_jpg",
         "rgb_raw",
@@ -91,7 +87,6 @@ def scan_data():
 
     pig_ids = sorted({r["pig_id"] for r in rows})
     n_rgb = sum(1 for r in rows if r["rgb_jpg"])
-    n_aligned = sum(1 for r in rows if r["rgb_aligned_jpg"])
     n_ir = sum(1 for r in rows if r["ir_jpg"])
     n_depth = sum(1 for r in rows if r["depth_jpg"])
 
@@ -100,7 +95,6 @@ def scan_data():
     print(f"Total pig-frame records: {len(rows)}")
     print(f"Pig IDs found: {pig_ids}")
     print(f"Records with RGB jpg:         {n_rgb}")
-    print(f"Records with RGB aligned jpg: {n_aligned}")
     print(f"Records with IR jpg:          {n_ir}")
     print(f"Records with Depth jpg:       {n_depth}")
 

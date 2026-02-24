@@ -7,7 +7,7 @@ import random
 
 import cv2
 
-from config import PRESENCE_CSV
+from config import DATA_DIR, PRESENCE_CSV
 
 
 def load_rows(csv_path, target):
@@ -21,7 +21,7 @@ def load_rows(csv_path, target):
 
 
 def find_image(row, key):
-    base = os.path.join("data", row["timestamp_folder"])
+    base = os.path.join(DATA_DIR, row["timestamp_folder"])
     ts = row.get("pig_timestamp", "")
     pid = row["pig_id"]
     if key == "rgb":
@@ -73,9 +73,8 @@ def main(args):
 
         title = (
             f"[{i}/{len(rows)}] {row['timestamp_folder']} pig{row['pig_id']} "
-            f"present={row.get('pig_present')} valid={row.get('valid_ratio')} "
-            f"fg={row.get('fg_ratio')} center_fg={row.get('center_fg_ratio')} "
-            f"blob={row.get('largest_blob_area')}"
+            f"present={row.get('pig_present')} ir_dark={row.get('ir_dark_ratio')} "
+            f"depth_valid={row.get('depth_valid_ratio')} {row.get('reason', '')}"
         )
         cv2.putText(panel, title, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
         cv2.imshow("Prefilter QA - RGB | IR | Depth", panel)

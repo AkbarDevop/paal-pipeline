@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
+from collections import Counter
 
 from config import BATCH_SIZE, IMG_SIZE, LABELS_CSV, TEST_PIG_IDS, TRAIN_PIG_IDS, VAL_PIG_IDS
 
@@ -45,6 +46,10 @@ class SowPostureDataset(Dataset):
         self.modality = modality
         self.transform = transform
         self.samples = []
+        self.label_map = None
+        if allowed_labels is not None:
+            allowed_sorted = sorted(set(int(x) for x in allowed_labels))
+            self.label_map = {orig: idx for idx, orig in enumerate(allowed_sorted)}
 
         if not os.path.exists(labels_csv):
             raise FileNotFoundError(f"Missing labels file: {labels_csv}")
@@ -62,6 +67,8 @@ class SowPostureDataset(Dataset):
                 label = int(row["label"])
                 if allowed_labels is not None and label not in allowed_labels:
                     continue
+                if self.label_map is not None:
+                    label = self.label_map[label]
 
                 self.samples.append(
                     {
@@ -74,10 +81,9 @@ class SowPostureDataset(Dataset):
                 )
 
         if not silent:
-            n_standing = sum(1 for s in self.samples if s["label"] == 1)
-            n_not = len(self.samples) - n_standing
             pigs = sorted({s["pig_id"] for s in self.samples})
-            print(f"  {len(self.samples)} samples | pigs: {pigs} | standing: {n_standing}, not_standing: {n_not}")
+            label_counts = Counter(s["label"] for s in self.samples)
+            print(f"  {len(self.samples)} samples | pigs: {pigs} | label_counts: {dict(sorted(label_counts.items()))}")
 
     def __len__(self):
         return len(self.samples)
