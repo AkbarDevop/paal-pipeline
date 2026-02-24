@@ -9,15 +9,15 @@ import torch
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from torch.utils.data import DataLoader
 
-from config import (
-    BATCH_SIZE,
-    BINARY_CLASSES,
-    POSTURE4_CLASSES,
-    LABELS_CSV,
-    MODEL_DIR,
-    OUTPUT_DIR,
-    TEST_PIG_IDS,
-)
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    HAS_PLT = True
+except ImportError:
+    HAS_PLT = False
+
+from config import BATCH_SIZE, BINARY_CLASSES, POSTURE4_CLASSES, LABELS_CSV, MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS
 from data_loader import MODALITY_CHANNELS, SowPostureDataset
 from models import SingleModalModel
 
@@ -36,9 +36,7 @@ def evaluate_model(modality, device, args, class_names):
     model.eval()
 
     test_set = SowPostureDataset(
-        modality=modality,
-        labels_csv=args.labels_csv,
-        pig_ids=TEST_PIG_IDS,
+        modality=modality, labels_csv=args.labels_csv, pig_ids=TEST_PIG_IDS,
         allowed_labels=None if not args.allowed_labels else [int(x) for x in args.allowed_labels.split(",")],
         silent=True,
     )
@@ -50,43 +48,28 @@ def evaluate_model(modality, device, args, class_names):
     preds, labels = [], []
     with torch.no_grad():
         for x, y in loader:
-            yhat = model(x.to(device)).argmax(1).cpu().numpy()
-            preds.extend(yhat)
+            preds.extend(model(x.to(device)).argmax(1).cpu().numpy())
             labels.extend(y.numpy())
 
-    preds = np.array(preds)
-    labels = np.array(labels)
-    acc = accuracy_score(labels, preds)
+    preds, labels = np.array(preds), np.array(labels)
     label_ids = sorted(class_names.keys())
-    cm = confusion_matrix(labels, preds, labels=label_ids)
-    report = classification_report(
-        labels,
-        preds,
-        labels=label_ids,
-        target_names=[class_names[i] for i in label_ids],
-        zero_division=0,
-    )
-
     return {
         "modality": modality,
-        "accuracy": acc,
+        "accuracy": accuracy_score(labels, preds),
         "n_test": len(test_set),
         "best_epoch": ckpt.get("epoch", "?"),
         "test_pigs": TEST_PIG_IDS,
-        "confusion_matrix": cm,
-        "report": report,
+        "confusion_matrix": confusion_matrix(labels, preds, labels=label_ids),
+        "report": classification_report(
+            labels, preds, labels=label_ids,
+            target_names=[class_names[i] for i in label_ids], zero_division=0,
+        ),
     }
 
 
 def plot_training_curves(modality, model_prefix):
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
+    if not HAS_PLT:
         return
-
     hist_path = os.path.join(OUTPUT_DIR, f"history_{model_prefix}_{modality}.json")
     if not os.path.exists(hist_path):
         return
@@ -116,14 +99,8 @@ def plot_training_curves(modality, model_prefix):
 
 
 def plot_comparison(results):
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
+    if not HAS_PLT:
         return
-
     names = [r["modality"] for r in results]
     vals = [r["accuracy"] * 100 for r in results]
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -206,6 +183,5 @@ if __name__ == "__main__":
     parser.add_argument("--num-classes", type=int, default=2, choices=[2, 4])
     parser.add_argument("--labels-csv", default=LABELS_CSV)
     parser.add_argument("--model-prefix", default="standing")
-    parser.add_argument("--allowed-labels", default=None,
-                        help="Comma-separated label ids to include, e.g. 0,1,2,3")
+    parser.add_argument("--allowed-labels", default=None)
     main(parser.parse_args())

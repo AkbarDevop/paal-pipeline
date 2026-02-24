@@ -47,12 +47,10 @@ def detect_present(depth, args):
     valid_vals = roi[valid]
     local_median = float(np.median(valid_vals))
 
-    # Foreground = points significantly closer than local background baseline.
     fg = (roi > 0) & (roi < (local_median - args.delta_mm))
     fg_ratio = float(fg.mean())
     blob = largest_blob_area((fg.astype(np.uint8) * 255))
 
-    # Stronger check in center-bottom region where pig body should appear.
     cx0, cx1 = int(args.center_x0 * w), int(args.center_x1 * w)
     cy0, cy1 = int(args.center_y0 * h), int(args.center_y1 * h)
     center = depth[cy0:cy1, cx0:cx1]
