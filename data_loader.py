@@ -42,9 +42,11 @@ class SowPostureDataset(Dataset):
         allowed_labels=None,
         transform=None,
         silent=False,
+        use_cropped=False,
     ):
         self.modality = modality
         self.transform = transform
+        self.use_cropped = use_cropped
         self.samples = []
         self.label_map = None
         if allowed_labels is not None:
@@ -73,8 +75,13 @@ class SowPostureDataset(Dataset):
                 self.samples.append(
                     {
                         "rgb_jpg": row.get("rgb_jpg", ""),
+                        "rgb_aligned_jpg": row.get("rgb_aligned_jpg", ""),
                         "ir_jpg": row.get("ir_jpg", ""),
                         "depth_jpg": row.get("depth_jpg", ""),
+                        "rgb_cropped_jpg": row.get("rgb_cropped_jpg", ""),
+                        "rgb_aligned_cropped_jpg": row.get("rgb_aligned_cropped_jpg", ""),
+                        "ir_cropped_jpg": row.get("ir_cropped_jpg", ""),
+                        "depth_cropped_jpg": row.get("depth_cropped_jpg", ""),
                         "label": label,
                         "pig_id": pid,
                     }
@@ -88,21 +95,35 @@ class SowPostureDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _pick(self, sample, key):
+        """Pick cropped path if use_cropped and available, else original."""
+        if self.use_cropped:
+            cropped = sample.get(key.replace("_jpg", "_cropped_jpg"), "")
+            if cropped and os.path.exists(cropped):
+                return cropped
+        return sample.get(key, "")
+
     def __getitem__(self, idx):
         sample = self.samples[idx]
         label = sample["label"]
         imgs = []
 
         if self.modality in ("rgb", "rgb_depth", "rgb_ir", "all"):
-            rgb = load_and_preprocess(sample["rgb_jpg"])
+            # Use aligned RGB (640x480, same frame as IR/depth) for fusion
+            if self.modality in ("rgb_depth", "rgb_ir", "all"):
+                rgb = load_and_preprocess(self._pick(sample, "rgb_aligned_jpg"))
+                if rgb is None:
+                    rgb = load_and_preprocess(self._pick(sample, "rgb_jpg"))
+            else:
+                rgb = load_and_preprocess(self._pick(sample, "rgb_jpg"))
             imgs.append(rgb if rgb is not None else np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32))
 
         if self.modality in ("ir", "rgb_ir", "all"):
-            ir = load_and_preprocess(sample["ir_jpg"])
+            ir = load_and_preprocess(self._pick(sample, "ir_jpg"))
             imgs.append(ir if ir is not None else np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32))
 
         if self.modality in ("depth", "rgb_depth", "all"):
-            depth = load_and_preprocess(sample["depth_jpg"])
+            depth = load_and_preprocess(self._pick(sample, "depth_jpg"))
             imgs.append(depth if depth is not None else np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32))
 
         x = np.concatenate(imgs, axis=2)
@@ -112,14 +133,15 @@ class SowPostureDataset(Dataset):
         return x, torch.tensor(label, dtype=torch.long)
 
 
-def get_dataloaders(modality="rgb", batch_size=BATCH_SIZE, labels_csv=LABELS_CSV, allowed_labels=None):
-    print(f"\nLoading data for modality='{modality}':")
+def get_dataloaders(modality="rgb", batch_size=BATCH_SIZE, labels_csv=LABELS_CSV, allowed_labels=None, use_cropped=False):
+    print(f"\nLoading data for modality='{modality}'{' (cropped)' if use_cropped else ''}:")
     print(f"  Train pigs: {TRAIN_PIG_IDS}")
     train_set = SowPostureDataset(
         modality=modality,
         labels_csv=labels_csv,
         pig_ids=TRAIN_PIG_IDS,
         allowed_labels=allowed_labels,
+        use_cropped=use_cropped,
     )
 
     print(f"  Val pigs:   {VAL_PIG_IDS}")
@@ -128,6 +150,7 @@ def get_dataloaders(modality="rgb", batch_size=BATCH_SIZE, labels_csv=LABELS_CSV
         labels_csv=labels_csv,
         pig_ids=VAL_PIG_IDS,
         allowed_labels=allowed_labels,
+        use_cropped=use_cropped,
     )
 
     print(f"  Test pigs:  {TEST_PIG_IDS}")
@@ -136,6 +159,7 @@ def get_dataloaders(modality="rgb", batch_size=BATCH_SIZE, labels_csv=LABELS_CSV
         labels_csv=labels_csv,
         pig_ids=TEST_PIG_IDS,
         allowed_labels=allowed_labels,
+        use_cropped=use_cropped,
     )
 
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0)

@@ -19,7 +19,7 @@ except ImportError:
 
 from config import BATCH_SIZE, BINARY_CLASSES, POSTURE3_CLASSES, LABELS_CSV, MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS
 from data_loader import MODALITY_CHANNELS, SowPostureDataset
-from models import SingleModalModel
+from models import BACKBONES, SingleModalModel
 
 
 def parse_allowed_labels(raw):
@@ -28,8 +28,9 @@ def parse_allowed_labels(raw):
     return [int(x.strip()) for x in raw.split(",") if x.strip() != ""]
 
 
-def evaluate_model(modality, device, args, class_names, allowed_labels):
-    model_path = os.path.join(MODEL_DIR, f"{args.model_prefix}_{modality}_best.pth")
+def evaluate_model(modality, device, args, class_names, allowed_labels, model_path=None):
+    if model_path is None:
+        model_path = os.path.join(MODEL_DIR, f"{args.model_prefix}_{modality}_best.pth")
     if not os.path.exists(model_path):
         print(f"  No model for '{modality}'")
         return None
@@ -37,13 +38,15 @@ def evaluate_model(modality, device, args, class_names, allowed_labels):
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
     in_channels = ckpt.get("in_channels", MODALITY_CHANNELS[modality])
     num_classes = ckpt.get("num_classes", args.num_classes)
-    model = SingleModalModel(in_channels=in_channels, num_classes=num_classes, pretrained=False).to(device)
+    backbone = ckpt.get("backbone", "mobilenet_v2")
+    model = SingleModalModel(in_channels=in_channels, num_classes=num_classes, pretrained=False, backbone=backbone).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
     test_set = SowPostureDataset(
         modality=modality, labels_csv=args.labels_csv, pig_ids=TEST_PIG_IDS,
         allowed_labels=allowed_labels,
+        use_cropped=args.use_cropped,
         silent=True,
     )
     if len(test_set) == 0:
@@ -192,43 +195,65 @@ def main(args):
     else:
         class_names = base_class_names
 
-    if args.modality:
-        modalities = args.modality
-    else:
-        modalities = sorted(
-            x.replace(f"{args.model_prefix}_", "").replace("_best.pth", "")
-            for x in os.listdir(MODEL_DIR)
-            if x.startswith(f"{args.model_prefix}_") and x.endswith("_best.pth")
-        )
-        modalities = [m for m in modalities if m in MODALITY_CHANNELS]
+    # Discover model files: {prefix}_{backbone}_{modality}_best.pth  or  {prefix}_{modality}_best.pth (legacy)
+    model_files = sorted(
+        f for f in os.listdir(MODEL_DIR)
+        if f.startswith(f"{args.model_prefix}_") and f.endswith("_best.pth")
+    )
 
-    if not modalities:
+    # Parse each file into (backbone, modality, path)
+    eval_targets = []
+    for f in model_files:
+        stem = f.replace(f"{args.model_prefix}_", "", 1).replace("_best.pth", "")
+        # Try backbone_modality pattern first
+        matched = False
+        for bb in BACKBONES:
+            if stem.startswith(bb + "_"):
+                mod = stem[len(bb) + 1:]
+                if mod in MODALITY_CHANNELS:
+                    eval_targets.append((bb, mod, os.path.join(MODEL_DIR, f)))
+                    matched = True
+                    break
+        if not matched and stem in MODALITY_CHANNELS:
+            eval_targets.append(("mobilenet_v2", stem, os.path.join(MODEL_DIR, f)))
+
+    # Filter by --backbone and --modality if specified
+    if args.backbone:
+        eval_targets = [t for t in eval_targets if t[0] == args.backbone]
+    if args.modality:
+        eval_targets = [t for t in eval_targets if t[1] in args.modality]
+
+    if not eval_targets:
         print("No trained models found.")
         return
 
-    print(f"Evaluating: {modalities}\n")
+    print(f"Evaluating {len(eval_targets)} model(s):\n")
     results = []
-    for m in modalities:
-        print(f"== {m.upper()} ==")
-        r = evaluate_model(m, device, args, class_names, allowed_labels)
+    for bb, m, mpath in eval_targets:
+        label = f"{bb}/{m}" if len(set(t[0] for t in eval_targets)) > 1 else m
+        print(f"== {label.upper()} ==")
+        r = evaluate_model(m, device, args, class_names, allowed_labels, model_path=mpath)
         if not r:
             print()
             continue
+        r["backbone"] = bb
+        r["label"] = label
         results.append(r)
         print(f"Test accuracy: {r['accuracy']:.4f} ({r['n_test']} frames, best epoch {r['best_epoch']})")
         print(f"Confusion matrix:\n{r['confusion_matrix']}")
         print(f"\n{r['report_text']}")
-        plot_training_curves(m, args.model_prefix)
-        plot_confusion_matrix(r["confusion_matrix"], class_names, m, args.model_prefix)
-        plot_per_class_accuracy(r["report_dict"], class_names, m, args.model_prefix)
+        tag = f"{bb}_{m}" if bb != "mobilenet_v2" else m
+        plot_training_curves(m, f"{args.model_prefix}_{bb}" if bb != "mobilenet_v2" else args.model_prefix)
+        plot_confusion_matrix(r["confusion_matrix"], class_names, tag, args.model_prefix)
+        plot_per_class_accuracy(r["report_dict"], class_names, tag, args.model_prefix)
         print()
 
     if len(results) > 1:
         print("== COMPARISON ==")
-        print(f"{'Modality':<15} {'Test Acc':>10} {'N_test':>8}")
-        print("-" * 35)
+        print(f"{'Model':<30} {'Test Acc':>10} {'N_test':>8}")
+        print("-" * 50)
         for r in sorted(results, key=lambda x: x["accuracy"], reverse=True):
-            print(f"{r['modality']:<15} {r['accuracy']*100:>9.1f}% {r['n_test']:>7}")
+            print(f"{r['label']:<30} {r['accuracy']*100:>9.1f}% {r['n_test']:>7}")
         plot_comparison(results)
 
     summary = [
@@ -256,4 +281,6 @@ if __name__ == "__main__":
     parser.add_argument("--labels-csv", default=LABELS_CSV)
     parser.add_argument("--model-prefix", default="standing")
     parser.add_argument("--allowed-labels", default=None)
+    parser.add_argument("--use-cropped", action="store_true", help="Use cropped images")
+    parser.add_argument("--backbone", default=None, choices=BACKBONES, help="Filter by backbone")
     main(parser.parse_args())

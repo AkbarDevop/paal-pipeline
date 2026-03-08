@@ -14,6 +14,10 @@ PRESENCE_CSV        = os.path.join(LABEL_DIR, "presence_filter.csv")
 
 IMG_SIZE   = 224
 
+# Crop box to remove neighbor pigs and ceiling (in ToF 640x480 coords)
+# For RGB 1280x800, scale by (w/640, h/480)
+CROP_TOF = (120, 30, 500, 480)  # (x_left, y_top, x_right, y_bottom)
+
 # 60/20/20 split by pig ID (test pigs are completely held out)
 TRAIN_PIG_IDS = list(range(0, 12))
 VAL_PIG_IDS   = list(range(12, 16))

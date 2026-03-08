@@ -18,7 +18,7 @@ from config import (
     LABELS_CSV,
 )
 from data_loader import get_dataloaders
-from models import build_model
+from models import BACKBONES, build_model
 
 
 def parse_allowed_labels(raw):
@@ -65,16 +65,40 @@ def main(args):
         batch_size=args.batch,
         labels_csv=args.labels_csv,
         allowed_labels=parse_allowed_labels(args.allowed_labels),
+        use_cropped=args.use_cropped,
     )
 
-    model = build_model(modality=args.modality, num_classes=args.num_classes, pretrained=True).to(device)
-    criterion = nn.CrossEntropyLoss()
+    model = build_model(modality=args.modality, num_classes=args.num_classes, pretrained=True, backbone=args.backbone).to(device)
+
+    if args.init_weights:
+        ckpt = torch.load(args.init_weights, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        src = ckpt.get("source", "unknown")
+        src_acc = ckpt.get("val_acc", 0)
+        print(f"Initialized weights from: {args.init_weights} (source={src}, val_acc={src_acc:.4f})")
+
+    # Compute class weights from training set for imbalanced data
+    if args.class_weights:
+        label_counts = {}
+        for _, lbl in train_loader.dataset:
+            lbl = lbl.item() if hasattr(lbl, 'item') else int(lbl)
+            label_counts[lbl] = label_counts.get(lbl, 0) + 1
+        n_samples = sum(label_counts.values())
+        n_classes = len(label_counts)
+        weights = torch.tensor(
+            [n_samples / (n_classes * label_counts.get(i, 1)) for i in range(args.num_classes)],
+            dtype=torch.float32,
+        ).to(device)
+        print(f"Class weights: {weights.tolist()}")
+        criterion = nn.CrossEntropyLoss(weight=weights)
+    else:
+        criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    model_tag = f"{args.model_prefix}_{args.modality}"
+    model_tag = f"{args.model_prefix}_{args.backbone}_{args.modality}"
     model_path = os.path.join(MODEL_DIR, f"{model_tag}_best.pth")
     hist_path = os.path.join(OUTPUT_DIR, f"history_{model_tag}.json")
 
@@ -105,6 +129,7 @@ def main(args):
                     "in_channels": in_channels,
                     "num_classes": args.num_classes,
                     "labels_csv": args.labels_csv,
+                    "backbone": args.backbone,
                 },
                 model_path,
             )
@@ -146,4 +171,8 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--lr", type=float, default=LEARNING_RATE)
     parser.add_argument("--batch", type=int, default=BATCH_SIZE)
+    parser.add_argument("--use-cropped", action="store_true", help="Use cropped images")
+    parser.add_argument("--class-weights", action="store_true", help="Use inverse-frequency class weights")
+    parser.add_argument("--backbone", default="mobilenet_v2", choices=BACKBONES)
+    parser.add_argument("--init-weights", default=None, help="Path to pretrained checkpoint for fine-tuning")
     main(parser.parse_args())

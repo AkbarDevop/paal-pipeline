@@ -6,7 +6,7 @@ import os
 
 import cv2
 
-from config import LABELS_CSV, LABELS_POSTURE3_CSV, METADATA_CSV
+from config import LABELS_CSV, LABELS_POSTURE3_CSV, METADATA_CSV, PRESENCE_CSV
 
 CLASS_SPECS = {
     "binary": {
@@ -147,5 +147,5 @@ if __name__ == "__main__":
     parser.add_argument("--show-depth", action="store_true")
     parser.add_argument("--class-set", choices=["binary", "posture3"], default="binary")
     parser.add_argument("--present-only", action="store_true")
-    parser.add_argument("--presence-csv", default=None)
+    parser.add_argument("--presence-csv", default=PRESENCE_CSV)
     main(parser.parse_args())

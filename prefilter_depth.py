@@ -1,49 +1,69 @@
-"""Pig presence and image quality prefilter.
+"""Pig presence prefilter using depth-based median threshold.
 
-Adapted from Xue et al. (sowbot) occlusion detection approach:
-images with excessive dark pixels are filtered as occluded/no-pig.
-Also uses depth raw data validity as a secondary signal.
+Classifies each frame as pig-present or no-pig by computing the
+median depth in the cropped stall region (with stall bars masked).
+
+Rule: median_depth < threshold → pig present
+      median_depth >= threshold → no pig
+
+Camera is side-mounted (vulva side):
+  - Pig present: body blocks view → lower median depth
+  - No pig: see through to far wall → higher median depth (~1500mm+)
 """
 
 import argparse
 import csv
 import os
 
-import cv2
 import numpy as np
 
-from config import METADATA_CSV, PRESENCE_CSV
+from config import CROP_TOF, METADATA_CSV, PRESENCE_CSV
+
+TOF_W, TOF_H = 640, 480
+THRESHOLD = 1463      # median depth in mm
+BAR_MARGIN = 50       # pixels to mask on left/right edges
 
 
-def is_occluded(image_path, dark_thresh=26, dark_ratio_thresh=0.4):
-    """Check if image is occluded using dark pixel ratio (sowbot method)."""
-    if not image_path or not os.path.exists(image_path):
-        return True, 1.0
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        return True, 1.0
-    dark_ratio = float((img < dark_thresh).mean())
-    return dark_ratio > dark_ratio_thresh, dark_ratio
-
-
-def check_depth_valid(path, min_valid_ratio=0.3):
-    """Check if depth raw file has enough valid pixels."""
+def load_depth_raw(path):
+    """Load depth raw file (uint16, 640x480, optional 8-byte header)."""
     if not path or not os.path.exists(path):
-        return False, 0.0
+        return None
     size = os.path.getsize(path)
-    expected = 640 * 480 * 2
+    expected = TOF_W * TOF_H * 2
     if size == expected + 8:
         raw = np.fromfile(path, dtype=np.uint16, offset=8)
     elif size == expected:
         raw = np.fromfile(path, dtype=np.uint16)
     else:
+        return None
+    if raw.size != TOF_W * TOF_H:
+        return None
+    return raw.reshape(TOF_H, TOF_W)
+
+
+def check_pig_present(depth_path, crop, bar_margin, threshold):
+    """Check if pig is present using median depth threshold."""
+    depth = load_depth_raw(depth_path)
+    if depth is None:
         return False, 0.0
-    if raw.size != 640 * 480:
+
+    x1, y1, x2, y2 = crop
+    cropped = depth[y1:y2, x1:x2]
+    ch, cw = cropped.shape
+
+    # Mask stall bars on left/right edges
+    bar_mask = np.ones((ch, cw), dtype=bool)
+    bar_mask[:, :bar_margin] = False
+    bar_mask[:, cw - bar_margin:] = False
+
+    valid = (cropped > 200) & (cropped < 5000) & bar_mask
+    masked = cropped[valid]
+
+    if masked.size == 0:
         return False, 0.0
-    depth = raw.reshape(480, 640)
-    valid = (depth > 200) & (depth < 5000)
-    valid_ratio = float(valid.mean())
-    return valid_ratio >= min_valid_ratio, valid_ratio
+
+    median_d = float(np.median(masked))
+    return median_d < threshold, median_d
 
 
 def main(args):
@@ -56,60 +76,26 @@ def main(args):
 
     out_rows = []
     present_count = 0
-    occluded_count = 0
-    depth_fail_count = 0
 
     for r in rows:
-        if args.force_all_present:
-            present_count += 1
-            out_rows.append({
-                "timestamp_folder": r["timestamp_folder"],
-                "pig_id": r["pig_id"],
-                "pig_timestamp": r.get("pig_timestamp", ""),
-                "pig_present": 1,
-                "ir_dark_ratio": "",
-                "depth_valid_ratio": "",
-                "reason": "force_all_present",
-            })
-            continue
-
-        ir_occluded, ir_dark_ratio = is_occluded(
-            r.get("ir_jpg", ""), args.dark_thresh, args.dark_ratio_thresh,
+        present, median_d = check_pig_present(
+            r.get("depth_raw", ""), CROP_TOF, args.bar_margin, args.threshold,
         )
-        depth_ok, depth_valid_ratio = check_depth_valid(
-            r.get("depth_raw", ""), args.min_depth_valid,
-        )
-
-        if ir_occluded:
-            occluded_count += 1
-        if not depth_ok:
-            depth_fail_count += 1
-
-        present = not ir_occluded or depth_ok
         if present:
             present_count += 1
-
-        reason = "ok"
-        if ir_occluded and not depth_ok:
-            reason = "occluded+no_depth"
-        elif ir_occluded:
-            reason = "ir_occluded_but_depth_ok"
-        elif not depth_ok:
-            reason = "depth_invalid_but_ir_ok"
 
         out_rows.append({
             "timestamp_folder": r["timestamp_folder"],
             "pig_id": r["pig_id"],
             "pig_timestamp": r.get("pig_timestamp", ""),
             "pig_present": int(present),
-            "ir_dark_ratio": round(ir_dark_ratio, 4),
-            "depth_valid_ratio": round(depth_valid_ratio, 4),
-            "reason": reason,
+            "median_depth": round(median_d, 1),
+            "threshold": args.threshold,
         })
 
     fields = [
         "timestamp_folder", "pig_id", "pig_timestamp",
-        "pig_present", "ir_dark_ratio", "depth_valid_ratio", "reason",
+        "pig_present", "median_depth", "threshold",
     ]
     with open(args.output_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -120,16 +106,13 @@ def main(args):
     print(f"Total frames: {len(out_rows)}")
     print(f"Pig present: {present_count}")
     print(f"No pig: {len(out_rows) - present_count}")
-    print(f"IR occluded: {occluded_count}")
-    print(f"Depth invalid: {depth_fail_count}")
+    print(f"Threshold: {args.threshold}mm | Bar margin: {args.bar_margin}px")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pig presence prefilter")
+    parser = argparse.ArgumentParser(description="Pig presence prefilter (depth median)")
     parser.add_argument("--metadata-csv", default=METADATA_CSV)
     parser.add_argument("--output-csv", default=PRESENCE_CSV)
-    parser.add_argument("--dark-thresh", type=int, default=26)
-    parser.add_argument("--dark-ratio-thresh", type=float, default=0.4)
-    parser.add_argument("--min-depth-valid", type=float, default=0.3)
-    parser.add_argument("--force-all-present", action="store_true")
+    parser.add_argument("--threshold", type=float, default=THRESHOLD)
+    parser.add_argument("--bar-margin", type=int, default=BAR_MARGIN)
     main(parser.parse_args())
