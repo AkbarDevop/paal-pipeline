@@ -9,7 +9,18 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from collections import Counter
 
-from config import BATCH_SIZE, IMG_SIZE, LABELS_CSV, TEST_PIG_IDS, TRAIN_PIG_IDS, VAL_PIG_IDS
+from config import BATCH_SIZE, DATA_DIR, IMG_SIZE, LABELS_CSV, TEST_PIG_IDS, TRAIN_PIG_IDS, VAL_PIG_IDS
+
+
+def _fix_path(p):
+    """Convert absolute Mac paths to current system paths."""
+    if not p:
+        return p
+    # Extract relative part: everything from 'data/' onward
+    idx = p.find("/data/")
+    if idx != -1:
+        return os.path.join(DATA_DIR, p[idx + 6:])
+    return p
 
 
 MODALITY_CHANNELS = {
@@ -74,14 +85,14 @@ class SowPostureDataset(Dataset):
 
                 self.samples.append(
                     {
-                        "rgb_jpg": row.get("rgb_jpg", ""),
-                        "rgb_aligned_jpg": row.get("rgb_aligned_jpg", ""),
-                        "ir_jpg": row.get("ir_jpg", ""),
-                        "depth_jpg": row.get("depth_jpg", ""),
-                        "rgb_cropped_jpg": row.get("rgb_cropped_jpg", ""),
-                        "rgb_aligned_cropped_jpg": row.get("rgb_aligned_cropped_jpg", ""),
-                        "ir_cropped_jpg": row.get("ir_cropped_jpg", ""),
-                        "depth_cropped_jpg": row.get("depth_cropped_jpg", ""),
+                        "rgb_jpg": _fix_path(row.get("rgb_jpg", "")),
+                        "rgb_aligned_jpg": _fix_path(row.get("rgb_aligned_jpg", "")),
+                        "ir_jpg": _fix_path(row.get("ir_jpg", "")),
+                        "depth_jpg": _fix_path(row.get("depth_jpg", "")),
+                        "rgb_cropped_jpg": _fix_path(row.get("rgb_cropped_jpg", "")),
+                        "rgb_aligned_cropped_jpg": _fix_path(row.get("rgb_aligned_cropped_jpg", "")),
+                        "ir_cropped_jpg": _fix_path(row.get("ir_cropped_jpg", "")),
+                        "depth_cropped_jpg": _fix_path(row.get("depth_cropped_jpg", "")),
                         "label": label,
                         "pig_id": pid,
                     }
