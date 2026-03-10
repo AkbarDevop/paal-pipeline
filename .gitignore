@@ -9,7 +9,7 @@ __pycache__/
 data/
 models/
 outputs/
-labels/*.csv
+# labels/*.csv  # now tracked — needed for Colab
 
 # Local tooling
 .claude/
