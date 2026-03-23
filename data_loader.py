@@ -9,18 +9,10 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from collections import Counter
 
-from config import BATCH_SIZE, DATA_DIR, IMG_SIZE, LABELS_CSV, TEST_PIG_IDS, TRAIN_PIG_IDS, VAL_PIG_IDS
+from config import BATCH_SIZE, IMG_SIZE, LABELS_CSV, TEST_PIG_IDS, TRAIN_PIG_IDS, VAL_PIG_IDS, resolve_path
 
 
-def _fix_path(p):
-    """Convert absolute Mac paths to current system paths."""
-    if not p:
-        return p
-    # Extract relative part: everything from 'data/' onward
-    idx = p.find("/data/")
-    if idx != -1:
-        return os.path.join(DATA_DIR, p[idx + 6:])
-    return p
+_fix_path = resolve_path
 
 
 MODALITY_CHANNELS = {

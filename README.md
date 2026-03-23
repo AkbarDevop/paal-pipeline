@@ -100,6 +100,34 @@ python3 train.py --modality ir --backbone mobilenet_v2 \
   --num-classes 3 --use-cropped --class-weights --lr 1e-5
 ```
 
+## Setup for New Machine
+
+The code is on GitHub, but data (15GB) and models (914MB) are too large for git.
+
+1. **Clone the repo**: `git clone https://github.com/AkbarDevop/paal-pipeline.git`
+2. **Install dependencies**: `pip install -r requirements.txt`
+3. **Get data**: Download `data/` from the shared Google Drive folder and place it inside the repo root
+4. **Get models** (optional): Download `models/` from Google Drive for pre-trained checkpoints
+5. **Run pipeline**: `python3 run_pipeline.py --all` or run individual steps below
+
+Label CSVs in `labels/` contain absolute paths from the original machine. The pipeline resolves these automatically via `config.resolve_path()` — no manual path editing needed.
+
+## Task B: Vulva Segmentation (In Progress)
+
+Annotate vulva regions on standing pig images for swelling detection.
+
+```bash
+# Label vulva polygons on standing frames (uses RGB for labeling)
+python3 label_vulva.py                    # All standing frames
+python3 label_vulva.py --pig 5            # Only pig 5
+python3 label_vulva.py --show-depth       # Show depth side-by-side
+python3 label_vulva.py --use-cropped      # Use cropped images
+```
+
+Workflow: classify frame quality (good/tail_closed/too_close/bad) → if good, draw polygon → saves binary mask PNG + coordinates to CSV.
+
+Output: `labels/vulva_labels.csv` + `labels/vulva_masks/*.png`
+
 ## Project Structure
 
 ```
@@ -113,14 +141,18 @@ paal_pipeline/
 ├── scan_data.py               # Index raw OAK timestamp folders
 ├── prefilter_depth.py         # Depth-based pig presence detection
 ├── crop_images.py             # Crop ROI from raw frames
-├── label_tool.py              # Manual labeling GUI
+├── label_tool.py              # Manual posture labeling GUI (Task A)
+├── label_vulva.py             # Vulva polygon annotation tool (Task B)
 ├── find_sitting.py            # Scan for sitting candidates in unlabeled data
 ├── infer_random.py            # Quick inference on random samples
 ├── align_images.py            # Align RGB/IR/depth modalities
+├── make_slides.py             # Generate weekly meeting slides
 ├── validate_pig_detection.py  # Validate depth prefilter accuracy
 ├── plot_pretrain_comparison.py  # Sowbot vs from-scratch comparison visuals
 ├── plot_pipeline_summary.py     # Presentation-ready summary figures
 ├── labels/                    # Label CSVs and backups
+│   ├── vulva_labels.csv       # Vulva annotations (Task B)
+│   └── vulva_masks/           # Binary mask PNGs (Task B)
 ├── models/                    # Saved model checkpoints (not tracked)
 ├── outputs/                   # Evaluation results and figures (not tracked)
 └── data/                      # Raw OAK exports (not tracked)
