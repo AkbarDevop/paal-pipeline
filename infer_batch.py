@@ -136,7 +136,16 @@ def scan_folder(data_dir):
                     "pig_timestamp": timestamp,
                 }
 
-            col_name = f"{modality}{'_cropped' if is_cropped else ''}_{ext}"
+            # Normalize modality names to match get_image() keys
+            # ir_vis → ir, depth_vis → depth (same as scan_data.py)
+            if modality == "ir_vis":
+                mod_key = "ir"
+            elif modality == "depth_vis":
+                mod_key = "depth"
+            else:
+                mod_key = modality
+
+            col_name = f"{mod_key}{'_cropped' if is_cropped else ''}_{ext}"
             records[key][col_name] = fpath
 
     frames = sorted(records.values(), key=lambda r: (r["timestamp_folder"], r["pig_id"]))
