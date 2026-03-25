@@ -5,7 +5,7 @@ Takes a single input path to raw OAK-D data, crops images, runs the
 trained model, and produces a predictions CSV + posture heatmap.
 
 Usage:
-    python run_inference.py C:\PAAL_Data\fed_pig
+    python run_inference.py C:\\PAAL_Data\\fed_pig
     python run_inference.py /path/to/oak_data
 """
 
