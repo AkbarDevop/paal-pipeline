@@ -42,9 +42,10 @@ def is_croppable(fname):
 
 
 def main(args):
+    data_dir = args.data_dir or DATA_DIR
     folders = sorted(
-        d for d in os.listdir(DATA_DIR)
-        if os.path.isdir(os.path.join(DATA_DIR, d)) and d[0].isdigit()
+        d for d in os.listdir(data_dir)
+        if os.path.isdir(os.path.join(data_dir, d)) and d[0].isdigit()
     )
     print(f"Found {len(folders)} data folders")
     print(f"Crop box (ToF coords): x={CROP_TOF[0]}..{CROP_TOF[2]}, y={CROP_TOF[1]}..{CROP_TOF[3]}")
@@ -53,7 +54,7 @@ def main(args):
     total_skipped = 0
 
     for folder in folders:
-        folder_path = os.path.join(DATA_DIR, folder)
+        folder_path = os.path.join(data_dir, folder)
         files = sorted(f for f in os.listdir(folder_path) if is_croppable(f))
         folder_count = 0
 
@@ -85,5 +86,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Crop images to stall region")
+    parser.add_argument("--data-dir", default=None, help="Path to data folder (default: config.DATA_DIR)")
     parser.add_argument("--force", action="store_true", help="Re-crop even if output exists")
     main(parser.parse_args())
