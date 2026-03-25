@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""One-command posture inference pipeline.
+
+Takes a single input path to raw OAK-D data, crops images, runs the
+trained model, and produces a predictions CSV + posture heatmap.
+
+Usage:
+    python run_inference.py C:\PAAL_Data\fed_pig
+    python run_inference.py /path/to/oak_data
+"""
+
+import argparse
+import csv
+import os
+import re
+import sys
+from collections import Counter
+from datetime import datetime
+
+import cv2
+import numpy as np
+import torch
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    HAS_PLT = True
+except ImportError:
+    HAS_PLT = False
+
+from config import CROP_TOF, MODEL_DIR, OUTPUT_DIR, POSTURE3_CLASSES, IMG_SIZE
+from models import SingleModalModel
+from data_loader import MODALITY_CHANNELS, load_and_preprocess
+
+# ── Constants ─────────────────────────────────────────────────────────────
+
+TOF_W, TOF_H = 640, 480
+DEPTH_THRESHOLD = 1463
+BAR_MARGIN = 50
+
+FILENAME_RE = re.compile(
+    r"^pig(\d+)_(depth_vis|depth|ir_vis|ir|rgb_aligned|rgb)_"
+    r"(\d{8}-\d{2}-\d{2}-\d{2})(_cropped)?\.(jpg|raw)$"
+)
+FOLDER_RE = re.compile(r"^\d{8}-\d{2}-\d{2}-\d{2}$")
+
+
+# ── Step 1: Crop images ──────────────────────────────────────────────────
+
+def crop_box_for_size(w, h):
+    x1, y1, x2, y2 = CROP_TOF
+    sx, sy = w / TOF_W, h / TOF_H
+    return int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
+
+
+def cropped_path(original_path):
+    base, ext = os.path.splitext(original_path)
+    return base + "_cropped" + ext
+
+
+def crop_all_images(data_dir):
+    """Crop all images in data_dir, skip already-cropped."""
+    folders = sorted(
+        d for d in os.listdir(data_dir)
+        if os.path.isdir(os.path.join(data_dir, d)) and d[0].isdigit()
+    )
+    print(f"[1/3] Cropping images in {len(folders)} folders...")
+
+    total = 0
+    skipped = 0
+    for folder in folders:
+        folder_path = os.path.join(data_dir, folder)
+        for fname in os.listdir(folder_path):
+            if not fname.endswith(".jpg") or "_cropped" in fname:
+                continue
+            if not re.match(r"^pig\d+_", fname):
+                continue
+
+            src = os.path.join(folder_path, fname)
+            dst = cropped_path(src)
+            if os.path.exists(dst):
+                skipped += 1
+                continue
+
+            img = cv2.imread(src)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            x1, y1, x2, y2 = crop_box_for_size(w, h)
+            cv2.imwrite(dst, img[y1:y2, x1:x2])
+            total += 1
+
+    print(f"  Cropped: {total} new, {skipped} already existed")
+
+
+# ── Step 2: Scan + prefilter + predict ────────────────────────────────────
+
+def load_depth_raw(path):
+    if not path or not os.path.exists(path):
+        return None
+    size = os.path.getsize(path)
+    expected = TOF_W * TOF_H * 2
+    if size == expected + 8:
+        raw = np.fromfile(path, dtype=np.uint16, offset=8)
+    elif size == expected:
+        raw = np.fromfile(path, dtype=np.uint16)
+    else:
+        return None
+    if raw.size != TOF_W * TOF_H:
+        return None
+    return raw.reshape((TOF_H, TOF_W))
+
+
+def check_pig_present(depth_raw_path):
+    depth = load_depth_raw(depth_raw_path)
+    if depth is None:
+        return True, 0.0
+    x1, y1, x2, y2 = CROP_TOF
+    crop = depth[y1:y2, x1:x2].copy()
+    crop[:, :BAR_MARGIN] = 0
+    crop[:, -BAR_MARGIN:] = 0
+    valid = crop[(crop > 200) & (crop < 5000)]
+    if len(valid) == 0:
+        return False, 0.0
+    median = float(np.median(valid))
+    return median < DEPTH_THRESHOLD, median
+
+
+def scan_folder(data_dir):
+    folders = sorted(
+        d for d in os.listdir(data_dir)
+        if os.path.isdir(os.path.join(data_dir, d)) and FOLDER_RE.match(d)
+    )
+    if not folders:
+        return []
+
+    records = {}
+    for folder in folders:
+        folder_path = os.path.join(data_dir, folder)
+        for fname in os.listdir(folder_path):
+            m = FILENAME_RE.match(fname)
+            if not m:
+                continue
+            pig_id = int(m.group(1))
+            modality = m.group(2)
+            timestamp = m.group(3)
+            is_cropped = m.group(4) is not None
+            ext = m.group(5)
+
+            key = (folder, pig_id, timestamp)
+            if key not in records:
+                records[key] = {
+                    "timestamp_folder": folder,
+                    "pig_id": pig_id,
+                    "pig_timestamp": timestamp,
+                }
+
+            if modality == "ir_vis":
+                mod_key = "ir"
+            elif modality == "depth_vis":
+                mod_key = "depth"
+            else:
+                mod_key = modality
+
+            col_name = f"{mod_key}{'_cropped' if is_cropped else ''}_{ext}"
+            records[key][col_name] = os.path.join(folder_path, fname)
+
+    return sorted(records.values(), key=lambda r: (r["timestamp_folder"], r["pig_id"]))
+
+
+def get_image_path(frame):
+    """Get cropped IR path, fall back to uncropped."""
+    for key in ("ir_cropped_jpg", "ir_jpg"):
+        p = frame.get(key, "")
+        if p and os.path.exists(p):
+            return p
+    return ""
+
+
+def run_predictions(data_dir, device, model):
+    frames = scan_folder(data_dir)
+    if not frames:
+        print("No frames found.")
+        return []
+
+    print(f"[2/3] Running inference on {len(frames)} frames...")
+
+    results = []
+    skipped = 0
+
+    with torch.no_grad():
+        for i, frame in enumerate(frames):
+            # Depth prefilter
+            depth_raw = frame.get("depth_raw", "")
+            present, median_d = check_pig_present(depth_raw)
+            if not present:
+                skipped += 1
+                continue
+
+            # Load image
+            path = get_image_path(frame)
+            img = load_and_preprocess(path) if path else None
+            if img is None:
+                img = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+
+            x = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(device)
+            logits = model(x)
+            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+            pred = int(np.argmax(probs))
+            conf = float(probs[pred])
+
+            results.append({
+                "timestamp_folder": frame["timestamp_folder"],
+                "pig_id": frame["pig_id"],
+                "pig_timestamp": frame["pig_timestamp"],
+                "prediction": pred,
+                "prediction_name": POSTURE3_CLASSES.get(pred, str(pred)),
+                "confidence": round(conf, 4),
+                "median_depth": round(median_d, 1),
+                "image_path": path,
+            })
+
+            if (i + 1) % 500 == 0:
+                print(f"  {i + 1}/{len(frames)} frames...")
+
+    print(f"  Predicted: {len(results)}, Skipped (empty stall): {skipped}")
+    return results
+
+
+# ── Step 3: Generate outputs ──────────────────────────────────────────────
+
+def save_csv(results, out_path):
+    fields = ["timestamp_folder", "pig_id", "pig_timestamp",
+              "prediction", "prediction_name", "confidence",
+              "median_depth", "image_path"]
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(results)
+
+
+def parse_timestamp(ts_str):
+    """Parse pig_timestamp like '20260211-09-17-49' to datetime."""
+    try:
+        return datetime.strptime(ts_str, "%Y%m%d-%H-%M-%S")
+    except ValueError:
+        return None
+
+
+def generate_heatmap(results, out_path):
+    """Generate a posture timeline heatmap (time x pig_id)."""
+    if not HAS_PLT:
+        print("  matplotlib not installed, skipping heatmap")
+        return
+
+    # Build time bins (1-hour blocks)
+    pig_ids = sorted(set(r["pig_id"] for r in results))
+    timestamps = [parse_timestamp(r["pig_timestamp"]) for r in results]
+    valid = [(r, t) for r, t in zip(results, timestamps) if t is not None]
+    if not valid:
+        print("  No valid timestamps for heatmap")
+        return
+
+    min_t = min(t for _, t in valid)
+    max_t = max(t for _, t in valid)
+
+    # Create hour-level bins
+    from datetime import timedelta
+    hours = []
+    t = min_t.replace(minute=0, second=0)
+    while t <= max_t:
+        hours.append(t)
+        t += timedelta(hours=1)
+
+    if not hours or not pig_ids:
+        return
+
+    # Posture encoding: standing=0, sitting=1, lying=2, no_data=-1
+    posture_map = {"standing": 0, "sitting": 1, "lying": 2}
+    grid = np.full((len(pig_ids), len(hours)), -1, dtype=float)
+    pig_idx = {pid: i for i, pid in enumerate(pig_ids)}
+
+    for r, t in valid:
+        if t is None:
+            continue
+        hi = int((t - hours[0]).total_seconds() / 3600)
+        hi = min(hi, len(hours) - 1)
+        pi = pig_idx[r["pig_id"]]
+        grid[pi, hi] = posture_map.get(r["prediction_name"], -1)
+
+    # Custom colormap: gray=no_data, green=standing, orange=sitting, blue=lying
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+    colors = ["#d4d4d4", "#22c55e", "#f97316", "#3b82f6"]
+    cmap = ListedColormap(colors)
+    bounds = [-1.5, -0.5, 0.5, 1.5, 2.5]
+    norm = BoundaryNorm(bounds, cmap.N)
+
+    fig, ax = plt.subplots(figsize=(max(14, len(hours) * 0.3), max(4, len(pig_ids) * 0.5)))
+    im = ax.pcolormesh(grid, cmap=cmap, norm=norm, edgecolors="white", linewidth=0.5)
+
+    # Y-axis: pig IDs
+    ax.set_yticks(np.arange(len(pig_ids)) + 0.5)
+    ax.set_yticklabels([f"pig {pid}" for pid in pig_ids], fontsize=8)
+
+    # X-axis: hours
+    step = max(1, len(hours) // 24)
+    ax.set_xticks(np.arange(0, len(hours), step) + 0.5)
+    ax.set_xticklabels(
+        [hours[i].strftime("%m/%d %H:%M") for i in range(0, len(hours), step)],
+        rotation=45, ha="right", fontsize=7,
+    )
+
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Pig ID")
+    ax.set_title("Posture Timeline Heatmap (hourly majority vote)")
+
+    # Legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#22c55e", label="Standing"),
+        Patch(facecolor="#f97316", label="Sitting"),
+        Patch(facecolor="#3b82f6", label="Lying"),
+        Patch(facecolor="#d4d4d4", label="No data"),
+    ]
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+
+
+def print_summary(results):
+    counts = Counter(r["prediction_name"] for r in results)
+    total = len(results)
+    print(f"\n{'='*50}")
+    print(f"  Total predicted: {total}")
+    for name in ["standing", "sitting", "lying"]:
+        c = counts.get(name, 0)
+        print(f"  {name:<10}: {c:>6} ({c/total*100:.1f}%)")
+    print(f"  Avg confidence: {np.mean([r['confidence'] for r in results]):.3f}")
+    print(f"{'='*50}")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="One-command posture inference: input path → CSV + heatmap"
+    )
+    parser.add_argument("data_dir", help="Path to OAK-D data folder")
+    parser.add_argument("--output-dir", default=None,
+                        help="Output directory (default: outputs/)")
+    args = parser.parse_args()
+
+    data_dir = args.data_dir
+    out_dir = args.output_dir or OUTPUT_DIR
+
+    if not os.path.isdir(data_dir):
+        print(f"Error: {data_dir} is not a directory")
+        sys.exit(1)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Device
+    device = torch.device(
+        "mps" if torch.backends.mps.is_available()
+        else "cuda" if torch.cuda.is_available()
+        else "cpu"
+    )
+    print(f"Device: {device}")
+
+    # Load model
+    model_path = os.path.join(MODEL_DIR, "posture3_ir_best.pth")
+    if not os.path.exists(model_path):
+        print(f"Error: model not found at {model_path}")
+        sys.exit(1)
+
+    ckpt = torch.load(model_path, map_location=device, weights_only=False)
+    backbone = ckpt.get("backbone", "mobilenet_v2")
+    model = SingleModalModel(
+        in_channels=ckpt.get("in_channels", 3),
+        num_classes=ckpt.get("num_classes", 3),
+        pretrained=False,
+        backbone=backbone,
+    ).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    print(f"Model: {backbone}, {ckpt.get('num_classes', 3)} classes\n")
+
+    # Step 1: Crop
+    crop_all_images(data_dir)
+
+    # Step 2: Predict
+    results = run_predictions(data_dir, device, model)
+    if not results:
+        print("No predictions generated.")
+        return
+
+    # Step 3: Save outputs
+    csv_path = os.path.join(out_dir, "predictions.csv")
+    heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
+
+    save_csv(results, csv_path)
+    print(f"\n[3/3] Generating outputs...")
+    generate_heatmap(results, heatmap_path)
+
+    print_summary(results)
+    print(f"\n  CSV:     {csv_path}")
+    print(f"  Heatmap: {heatmap_path}")
+
+
+if __name__ == "__main__":
+    main()
