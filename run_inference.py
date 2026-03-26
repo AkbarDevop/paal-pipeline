@@ -348,6 +348,116 @@ def generate_heatmap(results, out_path):
     plt.close()
 
 
+def generate_per_pig_heatmaps(results, out_dir):
+    """Generate individual heatmap per pig ID."""
+    if not HAS_PLT:
+        return
+
+    from datetime import timedelta
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+    from matplotlib.patches import Patch
+
+    posture_map = {"standing": 0, "sitting": 1, "lying": 2}
+    colors = ["#d4d4d4", "#22c55e", "#f97316", "#3b82f6"]
+    cmap = ListedColormap(colors)
+    bounds = [-1.5, -0.5, 0.5, 1.5, 2.5]
+    norm = BoundaryNorm(bounds, cmap.N)
+
+    pig_ids = sorted(set(r["pig_id"] for r in results))
+    timestamps = [(r, parse_timestamp(r["pig_timestamp"])) for r in results]
+    valid = [(r, t) for r, t in timestamps if t is not None]
+    if not valid:
+        return
+
+    min_t = min(t for _, t in valid)
+    max_t = max(t for _, t in valid)
+    hours = []
+    t = min_t.replace(minute=0, second=0)
+    while t <= max_t:
+        hours.append(t)
+        t += timedelta(hours=1)
+
+    pig_dir = os.path.join(out_dir, "per_pig")
+    os.makedirs(pig_dir, exist_ok=True)
+
+    for pid in pig_ids:
+        pig_results = [(r, t) for r, t in valid if r["pig_id"] == pid]
+        if not pig_results:
+            continue
+
+        from collections import defaultdict
+        votes = defaultdict(list)
+        for r, t in pig_results:
+            hi = int((t - hours[0]).total_seconds() / 3600)
+            hi = min(hi, len(hours) - 1)
+            votes[hi].append(posture_map.get(r["prediction_name"], -1))
+
+        grid = np.full((1, len(hours)), -1, dtype=float)
+        for hi, postures in votes.items():
+            grid[0, hi] = max(set(postures), key=postures.count)
+
+        _, ax = plt.subplots(figsize=(max(14, len(hours) * 0.15), 2))
+        ax.pcolormesh(grid, cmap=cmap, norm=norm, edgecolors="white", linewidth=0.5)
+        step = max(1, len(hours) // 24)
+        ax.set_xticks(np.arange(0, len(hours), step) + 0.5)
+        ax.set_xticklabels(
+            [hours[i].strftime("%m/%d %H:%M") for i in range(0, len(hours), step)],
+            rotation=45, ha="right", fontsize=7,
+        )
+        ax.set_yticks([0.5])
+        ax.set_yticklabels([f"pig {pid}"], fontsize=9)
+        ax.set_title(f"Pig {pid} — Posture Timeline", fontsize=11)
+
+        legend_elements = [
+            Patch(facecolor="#22c55e", label="Standing"),
+            Patch(facecolor="#f97316", label="Sitting"),
+            Patch(facecolor="#3b82f6", label="Lying"),
+            Patch(facecolor="#d4d4d4", label="No data"),
+        ]
+        ax.legend(handles=legend_elements, loc="upper right", fontsize=7, ncol=4)
+        plt.tight_layout()
+        plt.savefig(os.path.join(pig_dir, f"pig{pid}_heatmap.png"), dpi=150)
+        plt.close()
+
+    print(f"  Per-pig heatmaps: {pig_dir}/ ({len(pig_ids)} pigs)")
+
+
+def generate_timestamp_summary(results, out_path):
+    """Generate per-timestamp-folder summary CSV."""
+    from collections import defaultdict
+    folder_stats = defaultdict(lambda: {"standing": 0, "sitting": 0, "lying": 0, "total": 0, "conf_sum": 0.0})
+
+    for r in results:
+        folder = r["timestamp_folder"]
+        name = r["prediction_name"]
+        folder_stats[folder][name] += 1
+        folder_stats[folder]["total"] += 1
+        folder_stats[folder]["conf_sum"] += r["confidence"]
+
+    fields = ["timestamp_folder", "total_frames", "standing", "sitting", "lying",
+              "standing_pct", "sitting_pct", "lying_pct", "avg_confidence"]
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for folder in sorted(folder_stats):
+            s = folder_stats[folder]
+            t = s["total"]
+            writer.writerow({
+                "timestamp_folder": folder,
+                "total_frames": t,
+                "standing": s["standing"],
+                "sitting": s["sitting"],
+                "lying": s["lying"],
+                "standing_pct": round(s["standing"] / t * 100, 1),
+                "sitting_pct": round(s["sitting"] / t * 100, 1),
+                "lying_pct": round(s["lying"] / t * 100, 1),
+                "avg_confidence": round(s["conf_sum"] / t, 4),
+            })
+
+    print(f"  Timestamp summary: {out_path}")
+
+
 def print_summary(results):
     counts = Counter(r["prediction_name"] for r in results)
     total = len(results)
@@ -422,14 +532,19 @@ def main():
     # Step 3: Save outputs
     csv_path = os.path.join(out_dir, "predictions.csv")
     heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
+    ts_summary_path = os.path.join(out_dir, "timestamp_summary.csv")
 
     save_csv(results, csv_path)
     print(f"\n[3/3] Generating outputs...")
     generate_heatmap(results, heatmap_path)
+    generate_per_pig_heatmaps(results, out_dir)
+    generate_timestamp_summary(results, ts_summary_path)
 
     print_summary(results)
-    print(f"\n  CSV:     {csv_path}")
-    print(f"  Heatmap: {heatmap_path}")
+    print(f"\n  CSV:              {csv_path}")
+    print(f"  Heatmap (all):    {heatmap_path}")
+    print(f"  Per-pig heatmaps: {os.path.join(out_dir, 'per_pig')}/")
+    print(f"  Timestamp summary:{ts_summary_path}")
 
 
 if __name__ == "__main__":
