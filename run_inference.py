@@ -249,11 +249,20 @@ def parse_timestamp(ts_str):
         return None
 
 
+def normalize_pig_id(pid, num_stalls=20):
+    """Camera counter can overflow past num_stalls. Map back with modulo."""
+    return pid % num_stalls
+
+
 def generate_heatmap(results, out_path):
     """Generate a posture timeline heatmap (time x pig_id)."""
     if not HAS_PLT:
         print("  matplotlib not installed, skipping heatmap")
         return
+
+    # Normalize pig IDs (camera overflow: 20→0, 21→1, etc.)
+    for r in results:
+        r["pig_id"] = normalize_pig_id(r["pig_id"])
 
     # Build time bins (1-hour blocks)
     pig_ids = sorted(set(r["pig_id"] for r in results))
@@ -279,16 +288,24 @@ def generate_heatmap(results, out_path):
 
     # Posture encoding: standing=0, sitting=1, lying=2, no_data=-1
     posture_map = {"standing": 0, "sitting": 1, "lying": 2}
-    grid = np.full((len(pig_ids), len(hours)), -1, dtype=float)
-    pig_idx = {pid: i for i, pid in enumerate(pig_ids)}
 
+    # Majority vote per (pig, hour) cell
+    from collections import defaultdict
+    votes = defaultdict(list)
     for r, t in valid:
         if t is None:
             continue
         hi = int((t - hours[0]).total_seconds() / 3600)
         hi = min(hi, len(hours) - 1)
-        pi = pig_idx[r["pig_id"]]
-        grid[pi, hi] = posture_map.get(r["prediction_name"], -1)
+        pid = r["pig_id"]
+        posture = posture_map.get(r["prediction_name"], -1)
+        votes[(pid, hi)].append(posture)
+
+    pig_idx = {pid: i for i, pid in enumerate(pig_ids)}
+    grid = np.full((len(pig_ids), len(hours)), -1, dtype=float)
+    for (pid, hi), postures in votes.items():
+        # Majority vote: most common posture in this hour
+        grid[pig_idx[pid], hi] = max(set(postures), key=postures.count)
 
     # Custom colormap: gray=no_data, green=standing, orange=sitting, blue=lying
     from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -397,6 +414,10 @@ def main():
     if not results:
         print("No predictions generated.")
         return
+
+    # Normalize pig IDs in CSV too (camera overflow: 20→0, 21→1)
+    for r in results:
+        r["pig_id"] = normalize_pig_id(r["pig_id"])
 
     # Step 3: Save outputs
     csv_path = os.path.join(out_dir, "predictions.csv")
