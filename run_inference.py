@@ -264,8 +264,8 @@ def generate_heatmap(results, out_path):
     for r in results:
         r["pig_id"] = normalize_pig_id(r["pig_id"])
 
-    # Build time bins (1-hour blocks)
-    pig_ids = sorted(set(r["pig_id"] for r in results))
+    # Fixed Y-axis: always pig 0–19 regardless of which pigs have data
+    pig_ids = list(range(20))
     timestamps = [parse_timestamp(r["pig_timestamp"]) for r in results]
     valid = [(r, t) for r, t in zip(results, timestamps) if t is not None]
     if not valid:
@@ -314,20 +314,22 @@ def generate_heatmap(results, out_path):
     bounds = [-1.5, -0.5, 0.5, 1.5, 2.5]
     norm = BoundaryNorm(bounds, cmap.N)
 
-    fig, ax = plt.subplots(figsize=(max(14, len(hours) * 0.3), max(4, len(pig_ids) * 0.5)))
+    fig, ax = plt.subplots(figsize=(max(14, len(hours) * 0.3), 8))
     im = ax.pcolormesh(grid, cmap=cmap, norm=norm, edgecolors="white", linewidth=0.5)
 
-    # Y-axis: pig IDs
+    # Y-axis: fixed pig 0–19
     ax.set_yticks(np.arange(len(pig_ids)) + 0.5)
     ax.set_yticklabels([f"pig {pid}" for pid in pig_ids], fontsize=8)
+    ax.set_ylim(0, len(pig_ids))
 
-    # X-axis: hours
-    step = max(1, len(hours) // 24)
+    # X-axis: fixed 6-hour tick intervals
+    step = max(1, 6)
     ax.set_xticks(np.arange(0, len(hours), step) + 0.5)
     ax.set_xticklabels(
         [hours[i].strftime("%m/%d %H:%M") for i in range(0, len(hours), step)],
         rotation=45, ha="right", fontsize=7,
     )
+    ax.set_xlim(0, len(hours))
 
     ax.set_xlabel("Time")
     ax.set_ylabel("Pig ID")
@@ -398,12 +400,13 @@ def generate_per_pig_heatmaps(results, out_dir):
 
         _, ax = plt.subplots(figsize=(max(14, len(hours) * 0.15), 2))
         ax.pcolormesh(grid, cmap=cmap, norm=norm, edgecolors="white", linewidth=0.5)
-        step = max(1, len(hours) // 24)
+        step = max(1, 6)
         ax.set_xticks(np.arange(0, len(hours), step) + 0.5)
         ax.set_xticklabels(
             [hours[i].strftime("%m/%d %H:%M") for i in range(0, len(hours), step)],
             rotation=45, ha="right", fontsize=7,
         )
+        ax.set_xlim(0, len(hours))
         ax.set_yticks([0.5])
         ax.set_yticklabels([f"pig {pid}"], fontsize=9)
         ax.set_title(f"Pig {pid} — Posture Timeline", fontsize=11)
