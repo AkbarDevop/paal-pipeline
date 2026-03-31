@@ -70,6 +70,7 @@ def crop_all_images(data_dir):
 
     total = 0
     skipped = 0
+    corrupt = 0
     for folder in folders:
         folder_path = os.path.join(data_dir, folder)
         for fname in os.listdir(folder_path):
@@ -84,15 +85,24 @@ def crop_all_images(data_dir):
                 skipped += 1
                 continue
 
+            # Check file size — corrupt JPEGs are often tiny (<1KB)
+            if os.path.getsize(src) < 1000:
+                corrupt += 1
+                continue
+
             img = cv2.imread(src)
             if img is None:
+                corrupt += 1
                 continue
             h, w = img.shape[:2]
+            if h < 10 or w < 10:
+                corrupt += 1
+                continue
             x1, y1, x2, y2 = crop_box_for_size(w, h)
             cv2.imwrite(dst, img[y1:y2, x1:x2])
             total += 1
 
-    print(f"  Cropped: {total} new, {skipped} already existed")
+    print(f"  Cropped: {total} new, {skipped} already existed, {corrupt} corrupt/skipped")
 
 
 # ── Step 2: Scan + prefilter + predict ────────────────────────────────────
@@ -189,6 +199,7 @@ def run_predictions(data_dir, device, model):
 
     results = []
     skipped = 0
+    skipped_corrupt = 0
 
     with torch.no_grad():
         for i, frame in enumerate(frames):
@@ -199,11 +210,15 @@ def run_predictions(data_dir, device, model):
                 skipped += 1
                 continue
 
-            # Load image
+            # Load image — skip if missing or corrupt
             path = get_image_path(frame)
-            img = load_and_preprocess(path) if path else None
+            if not path:
+                skipped_corrupt += 1
+                continue
+            img = load_and_preprocess(path)
             if img is None:
-                img = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+                skipped_corrupt += 1
+                continue
 
             x = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(device)
             logits = model(x)
@@ -225,7 +240,7 @@ def run_predictions(data_dir, device, model):
             if (i + 1) % 500 == 0:
                 print(f"  {i + 1}/{len(frames)} frames...")
 
-    print(f"  Predicted: {len(results)}, Skipped (empty stall): {skipped}")
+    print(f"  Predicted: {len(results)}, Skipped (empty stall): {skipped}, Skipped (corrupt/missing): {skipped_corrupt}")
     return results
 
 
