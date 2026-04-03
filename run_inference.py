@@ -365,6 +365,108 @@ def generate_heatmap(results, out_path):
     plt.close()
 
 
+def generate_heatmap_raw(results, out_path):
+    """Generate heatmap with RAW pig IDs (including overflow 20+).
+
+    This shows all pig IDs the camera assigned, without normalization,
+    so you can visually spot which timestamps have duplicates (pig20, pig21, etc).
+    """
+    if not HAS_PLT:
+        print("  matplotlib not installed, skipping raw heatmap")
+        return
+
+    from datetime import timedelta
+    from collections import defaultdict
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+    from matplotlib.patches import Patch
+
+    posture_map = {"standing": 0, "sitting": 1, "lying": 2}
+
+    # Use ALL pig IDs found in data (including overflow)
+    all_pig_ids = sorted(set(r["pig_id"] for r in results))
+    max_pid = max(all_pig_ids) if all_pig_ids else 19
+
+    # Y-axis: pig 0 through max pig ID
+    pig_ids = list(range(max_pid + 1))
+
+    timestamps = [parse_timestamp(r["pig_timestamp"]) for r in results]
+    valid = [(r, t) for r, t in zip(results, timestamps) if t is not None]
+    if not valid:
+        return
+
+    min_t = min(t for _, t in valid)
+    max_t = max(t for _, t in valid)
+    hours = []
+    t = min_t.replace(minute=0, second=0)
+    while t <= max_t:
+        hours.append(t)
+        t += timedelta(hours=1)
+
+    if not hours or not pig_ids:
+        return
+
+    votes = defaultdict(list)
+    for r, t in valid:
+        hi = int((t - hours[0]).total_seconds() / 3600)
+        hi = min(hi, len(hours) - 1)
+        pid = r["pig_id"]
+        posture = posture_map.get(r["prediction_name"], -1)
+        votes[(pid, hi)].append(posture)
+
+    pig_idx = {pid: i for i, pid in enumerate(pig_ids)}
+    grid = np.full((len(pig_ids), len(hours)), -1, dtype=float)
+    for (pid, hi), postures in votes.items():
+        if pid in pig_idx:
+            grid[pig_idx[pid], hi] = max(set(postures), key=postures.count)
+
+    colors = ["#d4d4d4", "#22c55e", "#f97316", "#3b82f6"]
+    cmap = ListedColormap(colors)
+    bounds = [-1.5, -0.5, 0.5, 1.5, 2.5]
+    norm = BoundaryNorm(bounds, cmap.N)
+
+    fig, ax = plt.subplots(figsize=(max(14, len(hours) * 0.3), max(8, len(pig_ids) * 0.4)))
+    ax.pcolormesh(grid, cmap=cmap, norm=norm, edgecolors="white", linewidth=0.5)
+
+    ax.set_yticks(np.arange(len(pig_ids)) + 0.5)
+    labels = []
+    for pid in pig_ids:
+        if pid >= 20:
+            labels.append(f"pig {pid} (overflow)")
+        else:
+            labels.append(f"pig {pid}")
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.set_ylim(0, len(pig_ids))
+
+    # Draw a red line at pig 20 to separate normal from overflow
+    if max_pid >= 20:
+        ax.axhline(y=20, color="red", linewidth=2, linestyle="--")
+
+    step = max(1, 6)
+    ax.set_xticks(np.arange(0, len(hours), step) + 0.5)
+    ax.set_xticklabels(
+        [hours[i].strftime("%m/%d %H:%M") for i in range(0, len(hours), step)],
+        rotation=45, ha="right", fontsize=7,
+    )
+    ax.set_xlim(0, len(hours))
+
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Camera Pig ID (raw, unnormalized)")
+    ax.set_title("Posture Heatmap — RAW Pig IDs (overflow visible above red line)")
+
+    legend_elements = [
+        Patch(facecolor="#22c55e", label="Standing"),
+        Patch(facecolor="#f97316", label="Sitting"),
+        Patch(facecolor="#3b82f6", label="Lying"),
+        Patch(facecolor="#d4d4d4", label="No data"),
+    ]
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"  Raw ID heatmap: {out_path}")
+
+
 def generate_per_pig_heatmaps(results, out_dir):
     """Generate individual heatmap per pig ID."""
     if not HAS_PLT:
@@ -543,17 +645,23 @@ def main():
         print("No predictions generated.")
         return
 
-    # Normalize pig IDs in CSV too (camera overflow: 20→0, 21→1)
-    for r in results:
-        r["pig_id"] = normalize_pig_id(r["pig_id"])
-
     # Step 3: Save outputs
     csv_path = os.path.join(out_dir, "predictions.csv")
     heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
+    heatmap_raw_path = os.path.join(out_dir, "posture_heatmap_raw_ids.png")
     ts_summary_path = os.path.join(out_dir, "timestamp_summary.csv")
 
+    # Save CSV with raw (unnormalized) pig IDs
     save_csv(results, csv_path)
     print(f"\n[3/3] Generating outputs...")
+
+    # Generate heatmap with RAW pig IDs (including overflow 20+)
+    generate_heatmap_raw(results, heatmap_raw_path)
+
+    # Normalize pig IDs for the standard heatmap and per-pig outputs
+    for r in results:
+        r["pig_id"] = normalize_pig_id(r["pig_id"])
+
     generate_heatmap(results, heatmap_path)
     generate_per_pig_heatmaps(results, out_dir)
     generate_timestamp_summary(results, ts_summary_path)
@@ -561,6 +669,7 @@ def main():
     print_summary(results)
     print(f"\n  CSV:              {csv_path}")
     print(f"  Heatmap (all):    {heatmap_path}")
+    print(f"  Heatmap (raw IDs):{heatmap_raw_path}")
     print(f"  Per-pig heatmaps: {os.path.join(out_dir, 'per_pig')}/")
     print(f"  Timestamp summary:{ts_summary_path}")
 
