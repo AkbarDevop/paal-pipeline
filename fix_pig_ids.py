@@ -23,13 +23,23 @@ PIG_FILE_RE = re.compile(r"^pig(\d+)_(.+)$")
 
 CORRECTIONS = [
     {
-        "name": "Camera magnet issue — pig19 duplication",
+        "name": "02/13 camera magnet issue — pig19 duplication",
         "start": "20260213-13-41-49",
         "end": "20260213-19-01-34",
         "actions": [
-            ("delete", 19),       # pig19 files are not real pig19
-            ("rename", 20, 19),   # pig20 files are actually pig19
-            ("delete_gte", 21),   # pig21+ are duplicates of pig19
+            ("delete", 19),       # pig19 = dup of pig18
+            ("rename", 20, 19),   # pig20 = real pig19
+            ("delete_gte", 21),   # pig21+ = duplicates
+        ],
+    },
+    {
+        "name": "02/18 camera magnet issue — pig19 duplication",
+        "start": "20260218-15-33-04",
+        "end": "20260218-19-00-39",
+        "actions": [
+            ("delete", 19),       # pig19 = dup of pig18
+            ("rename", 20, 19),   # pig20 = real pig19
+            ("delete_gte", 21),   # pig21+ = duplicates
         ],
     },
 ]
