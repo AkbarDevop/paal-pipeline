@@ -19,20 +19,68 @@ from config import OUTPUT_DIR
 # Same rules as fix_pig_ids.py
 CORRECTIONS = [
     {
-        "name": "02/13 camera magnet issue — pig19 duplication",
+        "name": "Camera magnet issue — pig19 duplication (02/13)",
         "start": "20260213-13-41-49",
-        "end": "20260213-19-01-34",
+        "end": "20260213-19-22-53",
         "delete_pids": [19],       # pig19 = dup of pig18 → delete
         "rename": {20: 19},        # pig20 = real pig19 → rename
         "delete_gte": 21,          # pig21+ = duplicates → delete
     },
     {
-        "name": "02/18 camera magnet issue — pig19 duplication",
+        "name": "Camera counter overflow (02/17)",
+        "start": "20260217-06-01-04",
+        "end": "20260217-06-01-04",
+        "delete_pids": [19],       # pig19 dup
+        "rename": {20: 19},        # pig20 → pig19
+        "delete_gte": 21,
+    },
+    {
+        "name": "Camera counter overflow — morning (02/18)",
+        "start": "20260218-10-54-39",
+        "end": "20260218-11-15-52",
+        "delete_pids": [19, 20],   # pig19 + pig20 dups
+        "rename": {21: 19},        # pig21 → pig19
+        "delete_gte": 22,
+    },
+    {
+        "name": "Camera counter overflow — afternoon (02/18)",
         "start": "20260218-15-33-04",
         "end": "20260218-19-00-39",
         "delete_pids": [19],       # pig19 = dup of pig18 → delete
         "rename": {20: 19},        # pig20 = real pig19 → rename
         "delete_gte": 21,          # pig21+ = duplicates → delete
+    },
+    {
+        "name": "Camera counter overflow — pig19=pig17, pig20=pig18 (02/19)",
+        "start": "20260219-15-09-15",
+        "end": "20260219-17-58-36",
+        "delete_pids": [19, 20],   # pig19=pig17 dup, pig20=pig18 dup
+        "rename": {21: 19},        # pig21 → pig19 (real pig19)
+        "delete_gte": 22,          # remove pig22+ rows (extra duplicates)
+    },
+    {
+        "name": "Camera counter overflow (02/20)",
+        "start": "20260220-16-36-37",
+        "end": "20260220-16-36-37",
+        "delete_pids": [],
+        "rename": {},
+        "delete_gte": 20,          # delete pig20+ rows
+    },
+    {
+        "name": "Camera counter overflow (03/08)",
+        "start": "20260308-05-39-19",
+        "end": "20260308-05-39-19",
+        "delete_pids": [],
+        "rename": {},
+        "delete_gte": 20,
+    },
+    {
+        "name": "Camera counter overflow (03/10-03/11)",
+        "start": "20260310-17-43-30",
+        "end": "20260311-14-11-47",
+        "delete_pids": [],
+        "rename": {},
+        "delete_gte": 20,
     },
 ]
 

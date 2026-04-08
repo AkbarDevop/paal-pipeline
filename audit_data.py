@@ -83,11 +83,35 @@ def audit(data_dir, output_csv=None):
         })
 
     # ── Report ──────────────────────────────────────────────────────────
+
+    # Determine "normal" file count (most common)
+    normal_count = file_count_dist.most_common(1)[0][0]
+
     print("=" * 60)
     print("FILE COUNT DISTRIBUTION (how many folders have N files)")
     print("=" * 60)
     for count in sorted(file_count_dist):
-        print(f"  {count:>4} files: {file_count_dist[count]:>5} folders")
+        marker = " <-- expected" if count == normal_count else ""
+        print(f"  {count:>4} files: {file_count_dist[count]:>5} folders{marker}")
+
+    # Abnormal file count folders
+    abnormal_count = [r for r in rows if r["total_files"] != normal_count]
+    print(f"\n{'=' * 60}")
+    print(f"FOLDERS WITH ABNORMAL FILE COUNT (!= {normal_count})")
+    print(f"{'=' * 60}")
+    if not abnormal_count:
+        print(f"  All {len(rows)} folders have exactly {normal_count} files.")
+    else:
+        print(f"  {'Folder':<25} {'Files':>6} {'Diff':>6}  Details")
+        print(f"  {'-'*25} {'-'*6} {'-'*6}  {'-'*30}")
+        for r in abnormal_count:
+            diff = r["total_files"] - normal_count
+            sign = "+" if diff > 0 else ""
+            missing_str = f"missing pigs: {r['missing_pigs']}" if r["missing_pigs"] else ""
+            overflow_str = f"overflow IDs: {r['overflow_pigs']}" if r["overflow_pigs"] else ""
+            extra = " | ".join(filter(None, [missing_str, overflow_str]))
+            print(f"  {r['timestamp_folder']:<25} {r['total_files']:>6} {sign}{diff:>5}  {extra}")
+        print(f"\n  Total abnormal: {len(abnormal_count)} / {len(rows)} folders")
 
     print(f"\n{'=' * 60}")
     print("PIG COUNT DISTRIBUTION (how many pigs per folder)")
@@ -99,12 +123,15 @@ def audit(data_dir, output_csv=None):
     print(f"\n{'=' * 60}")
     print("MISSING PIG SUMMARY")
     print("=" * 60)
-    for pid in sorted(missing_pig_tracker):
-        folders_missing = missing_pig_tracker[pid]
-        if len(folders_missing) <= 5:
-            print(f"  pig {pid:>2}: missing in {len(folders_missing)} folders — {folders_missing}")
-        else:
-            print(f"  pig {pid:>2}: missing in {len(folders_missing)} folders — {folders_missing[0]} ... {folders_missing[-1]}")
+    if not missing_pig_tracker:
+        print("  No missing pigs detected.")
+    else:
+        for pid in sorted(missing_pig_tracker):
+            folders_missing = missing_pig_tracker[pid]
+            if len(folders_missing) <= 5:
+                print(f"  pig {pid:>2}: missing in {len(folders_missing)} folders — {folders_missing}")
+            else:
+                print(f"  pig {pid:>2}: missing in {len(folders_missing)} folders — {folders_missing[0]} ... {folders_missing[-1]}")
 
     # Show folders with abnormal pig counts
     print(f"\n{'=' * 60}")

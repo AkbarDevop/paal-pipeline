@@ -154,13 +154,14 @@ def main():
     rows = load_csv(args.csv)
     print(f"  {len(rows)} frames loaded")
 
-    if args.no_normalize:
-        out = args.output or os.path.join(OUTPUT_DIR, "posture_heatmap_raw_ids.png")
-        title = "Posture Heatmap — RAW Pig IDs (overflow visible above red line)"
-        generate_heatmap(rows, out, title=title, normalize=False)
-    else:
-        out = args.output or os.path.join(OUTPUT_DIR, "posture_heatmap.png")
-        generate_heatmap(rows, out, normalize=True)
+    # Always generate both heatmaps
+    out_norm = args.output or os.path.join(OUTPUT_DIR, "posture_heatmap.png")
+    generate_heatmap(list(rows), out_norm, normalize=True)
+
+    out_raw = os.path.join(OUTPUT_DIR, "posture_heatmap_raw_ids.png")
+    rows_raw = load_csv(args.csv)
+    title_raw = "Posture Heatmap — RAW Pig IDs (overflow visible above red line)"
+    generate_heatmap(rows_raw, out_raw, title=title_raw, normalize=False)
 
 
 if __name__ == "__main__":
