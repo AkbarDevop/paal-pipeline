@@ -1,10 +1,23 @@
 """Central configuration for the PAAL pipeline."""
 import os
 
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR   = os.path.join(BASE_DIR, "data")
-LABEL_DIR  = os.path.join(BASE_DIR, "labels")
-MODEL_DIR  = os.path.join(BASE_DIR, "models")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+IMAGE_DIR = os.path.join(BASE_DIR, "images")
+
+
+def _default_data_dir():
+    """Prefer data/ when present, otherwise fall back to images/."""
+    data_dir = os.path.join(BASE_DIR, "data")
+    if os.path.isdir(data_dir):
+        return data_dir
+    if os.path.isdir(IMAGE_DIR):
+        return IMAGE_DIR
+    return data_dir
+
+
+DATA_DIR = _default_data_dir()
+LABEL_DIR = os.path.join(BASE_DIR, "labels")
+MODEL_DIR = os.path.join(BASE_DIR, "models")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 
 METADATA_CSV        = os.path.join(LABEL_DIR, "metadata.csv")
@@ -13,6 +26,13 @@ LABELS_POSTURE3_CSV = os.path.join(LABEL_DIR, "labels_posture3.csv")
 PRESENCE_CSV        = os.path.join(LABEL_DIR, "presence_filter.csv")
 VULVA_LABELS_CSV    = os.path.join(LABEL_DIR, "vulva_labels.csv")
 VULVA_MASK_DIR      = os.path.join(LABEL_DIR, "vulva_masks")
+VULVA_DEPTH_CSV     = os.path.join(LABEL_DIR, "vulva_depth_labels.csv")
+VULVA_DEPTH_MASK_DIR = os.path.join(LABEL_DIR, "vulva_masks_depth")
+VULVA_DEPTHMAP_DIR  = os.path.join(BASE_DIR, "depthmap_vulva")
+VULVA_MANUAL_LABELS_CSV = os.path.join(LABEL_DIR, "vulva_manual_labels.csv")
+VULVA_MANUAL_MASK_DIR = os.path.join(LABEL_DIR, "vulva_masks_manual")
+VULVA_MANUAL_MEASUREMENTS_CSV = os.path.join(LABEL_DIR, "vulva_measurements_manual.csv")
+VULVA_LENGTH_WIDTH_CSV = os.path.join(LABEL_DIR, "vulva_length_width_labels.csv")
 
 IMG_SIZE   = 224
 
@@ -40,9 +60,28 @@ def resolve_path(csv_path):
     If the path doesn't exist (different machine), extract the relative
     part after '/data/' and resolve against the local DATA_DIR.
     """
-    if not csv_path or os.path.exists(csv_path):
+    if not csv_path:
         return csv_path
+
+    if os.path.exists(csv_path):
+        return csv_path
+
+    if not os.path.isabs(csv_path):
+        local_rel = os.path.join(BASE_DIR, csv_path)
+        if os.path.exists(local_rel):
+            return local_rel
+
     parts = csv_path.replace("\\", "/").split("/data/")
     if len(parts) == 2:
-        return os.path.join(DATA_DIR, parts[1])
+        rel = parts[1]
+        candidates = []
+        for root in (DATA_DIR, IMAGE_DIR, os.path.join(BASE_DIR, "data")):
+            if root and root not in candidates:
+                candidates.append(root)
+        for root in candidates:
+            candidate = os.path.join(root, rel)
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.join(DATA_DIR, rel)
+
     return csv_path
