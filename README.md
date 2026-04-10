@@ -128,6 +128,72 @@ Workflow: classify frame quality (good/tail_closed/too_close/bad) → if good, d
 
 Output: `labels/vulva_labels.csv` + `labels/vulva_masks/*.png`
 
+### Task B.1: Pig depth map / 3D surface
+
+Build a pig-scale 3D reconstruction from one depth frame plus the matching IR image. This creates the 3D foundation for the next step, where a vulva-only mask can isolate the vulva surface instead of just the 2D outline.
+
+```bash
+# Build a pig point cloud + textured mesh from one frame
+python3 point_cloud.py \
+  --depth-raw images/20260211-09-17-32/pig0_depth_20260211-09-17-49.raw \
+  --ir-img images/20260211-09-17-32/pig0_ir_vis_20260211-09-17-49.jpg
+
+# Later: pass a binary mask to keep only the vulva region
+python3 point_cloud.py \
+  --depth-raw /path/to/pig_depth.raw \
+  --ir-img /path/to/pig_ir_vis.jpg \
+  --mask /path/to/vulva_mask.png
+```
+
+Outputs are written to `outputs/<frame>_depthmap/`:
+- `pig_point_cloud.ply` - IR-textured point cloud
+- `pig_surface.obj` + `.mtl` + `mesh_texture.png` - textured surface mesh
+- `depthmap_bundle.npz` - arrays for downstream vulva-only segmentation / measurement
+- `mask.png`, `segmented_depth.png`, `summary.json`
+
+### Task B.2: Vulva mask in depth coordinates
+
+Project vulva masks from RGB annotation space into the ToF/depth frame, then build vulva-only 3D outputs from the projected masks.
+
+```bash
+# After labels/vulva_labels.csv exists
+python3 build_vulva_depthmaps.py
+
+# Optional: only create depth-coordinate masks
+python3 build_vulva_depthmaps.py --no-3d
+
+# View one 3D point cloud / mesh interactively
+python3 view_pointcloud.py depthmap/20260211-09-17-32/pig0_20260211-09-17-49
+```
+
+Outputs:
+- `labels/vulva_masks_depth/*.png` - vulva masks in ToF/depth coordinates
+- `labels/vulva_depth_labels.csv` - manifest of projected masks and 3D outputs
+- `depthmap_vulva/<timestamp>/<frame>/` - vulva-only point cloud, mesh, previews, and summaries
+
+### Task B.3: Manual vulva length and width on every live image
+
+Label every current dataset frame directly on the IR image, with a simple point-based workflow.
+
+```bash
+# Annotate the live images/ dataset
+python3 label_vulva_dataset.py
+
+# Optional: only work on one pig or a smaller slice
+python3 label_vulva_dataset.py --pig 0
+python3 label_vulva_dataset.py --start-at 25 --limit 40
+```
+
+Annotation statuses:
+- `present` - click 2 points for vulva length, then 2 points for vulva width
+- `not_clear` - vulva is not clear enough to measure
+- `skip` - leave the frame for later
+
+Outputs:
+- `labels/vulva_length_width_labels.csv` - per-frame timeslot, pig ID, status, `L`, `W`, and estimated volume
+
+The tool uses the IR/depth-aligned frame plus ToF intrinsics to convert the clicked point pairs into metric `L/W` values. Volume is estimated with an ellipsoid assumption using diameters `L x W x W`.
+
 ## Project Structure
 
 ```
@@ -143,6 +209,7 @@ paal_pipeline/
 ├── crop_images.py             # Crop ROI from raw frames
 ├── label_tool.py              # Manual posture labeling GUI (Task A)
 ├── label_vulva.py             # Vulva polygon annotation tool (Task B)
+├── point_cloud.py             # Depth raw + IR -> pig point cloud + textured mesh
 ├── find_sitting.py            # Scan for sitting candidates in unlabeled data
 ├── infer_random.py            # Quick inference on random samples
 ├── align_images.py            # Align RGB/IR/depth modalities
