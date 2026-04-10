@@ -24,6 +24,7 @@ import numpy as np
 
 from config import (
     LABELS_POSTURE3_CSV,
+    METADATA_CSV,
     VULVA_LABELS_CSV,
     VULVA_MASK_DIR,
     resolve_path,
@@ -42,12 +43,26 @@ QUALITY_KEYS = {
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def load_standing_frames(labels_csv, pig_id=None):
+def load_metadata_index(metadata_csv):
+    """Load full frame metadata keyed by (timestamp_folder, pig_id)."""
+    if not os.path.exists(metadata_csv):
+        return {}
+
+    out = {}
+    with open(metadata_csv, "r") as f:
+        for row in csv.DictReader(f):
+            key = (row.get("timestamp_folder", ""), row.get("pig_id", ""))
+            out[key] = row
+    return out
+
+
+def load_standing_frames(labels_csv, pig_id=None, metadata_csv=METADATA_CSV):
     """Load standing frames (label=0) from posture3 labels."""
     if not os.path.exists(labels_csv):
         print(f"Missing labels file: {labels_csv}")
         return []
 
+    metadata = load_metadata_index(metadata_csv)
     rows = []
     with open(labels_csv, "r") as f:
         for row in csv.DictReader(f):
@@ -56,7 +71,10 @@ def load_standing_frames(labels_csv, pig_id=None):
             pid = int(row["pig_id"])
             if pig_id is not None and pid != pig_id:
                 continue
-            rows.append(row)
+            key = (row.get("timestamp_folder", ""), row.get("pig_id", ""))
+            merged = dict(metadata.get(key, {}))
+            merged.update(row)
+            rows.append(merged)
     return rows
 
 
@@ -194,9 +212,10 @@ def main(args):
     file_exists = os.path.exists(VULVA_LABELS_CSV)
     fields = [
         "timestamp_folder", "pig_id", "pig_timestamp",
-        "rgb_jpg", "ir_jpg", "depth_jpg",
-        "ir_cropped_jpg", "depth_cropped_jpg",
-        "quality", "polygon_points", "mask_path",
+        "rgb_jpg", "rgb_aligned_jpg", "ir_jpg", "depth_jpg",
+        "rgb_cropped_jpg", "rgb_aligned_cropped_jpg", "ir_cropped_jpg", "depth_cropped_jpg",
+        "rgb_raw", "ir_raw", "depth_raw",
+        "quality", "mask_space", "polygon_points", "mask_path",
     ]
 
     with open(VULVA_LABELS_CSV, "a", newline="") as f:
@@ -260,6 +279,7 @@ def main(args):
 
             polygon_str = ""
             mask_path = ""
+            mask_space = "rgb_cropped" if args.use_cropped else "rgb"
 
             # Step 2: If good, draw polygon
             if quality == "good":
@@ -317,11 +337,18 @@ def main(args):
                 "pig_id": row["pig_id"],
                 "pig_timestamp": row["pig_timestamp"],
                 "rgb_jpg": row.get("rgb_jpg", ""),
+                "rgb_aligned_jpg": row.get("rgb_aligned_jpg", ""),
                 "ir_jpg": row.get("ir_jpg", ""),
                 "depth_jpg": row.get("depth_jpg", ""),
+                "rgb_cropped_jpg": row.get("rgb_cropped_jpg", ""),
+                "rgb_aligned_cropped_jpg": row.get("rgb_aligned_cropped_jpg", ""),
                 "ir_cropped_jpg": row.get("ir_cropped_jpg", ""),
                 "depth_cropped_jpg": row.get("depth_cropped_jpg", ""),
+                "rgb_raw": row.get("rgb_raw", ""),
+                "ir_raw": row.get("ir_raw", ""),
+                "depth_raw": row.get("depth_raw", ""),
                 "quality": quality,
+                "mask_space": mask_space,
                 "polygon_points": polygon_str,
                 "mask_path": mask_path,
             })
