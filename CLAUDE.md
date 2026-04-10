@@ -90,12 +90,50 @@ python extract_rear_view_pig_manual.py INPUT              # Manual polygon rear-
 - **JET colormap**: Paper uses linear JET for depth visualization: linear normalization min→max, cv2.COLORMAP_JET
 - **Open3D for detection**: User requested Open3D (3D library) over OpenCV for vulva detection — works in 3D point space via DBSCAN clustering
 
+## Data Cleaning (Akbar — Task 2)
+Audited all 3,766 timestamp folders. 97.6% (3,674) have exactly 20 pigs.
+
+### Camera Magnet Corrections Applied
+All corrections are scripted in `fix_pig_ids.py` and `fix_predictions_csv.py`:
+
+| Range | Folders | Issue | Fix |
+|-------|---------|-------|-----|
+| 02/13 13:41–19:22 | 32 | pig19=dup of pig18, pig20=real pig19 | delete pig19, rename pig20→pig19, delete pig21+ |
+| 02/17 06:01 | 1 | overflow | same pattern |
+| 02/18 10:54–11:15 | 3 | pig19+pig20 dups | delete pig19+pig20, rename pig21→pig19, delete pig22+ |
+| 02/18 15:33–19:00 | 14 | pig19=dup, pig20=real pig19 | delete pig19, rename pig20→pig19, delete pig21+ |
+| 02/19 15:09–17:58 | ~10 | pig19=pig17 dup, pig20=pig18 dup | delete pig19+pig20, rename pig21→pig19, delete pig22+ |
+| 02/20, 03/08, 03/10-03/11 | few | simple overflow | delete pig20+ |
+
+### Data Gaps
+- Camera down: 02/16–02/17, 02/20–02/22 (no frames exist)
+- Pig 18 & 19: empty stalls throughout
+- **Clean data window: 02/23–03/12** (17 days, clear posture cycles)
+
+### Tools Built
+- `audit_data.py` — scan folders, report missing/overflow pig IDs
+- `detect_missing_pigs.py` — depth-based comparison for < 20 pig folders
+- `detect_id_shifts.py` — stall depth fingerprinting (inconclusive — stalls equidistant)
+- `fix_pig_ids.py` — apply file rename/delete corrections (with --dry-run)
+- `fix_predictions_csv.py` — apply same corrections to predictions CSV
+- `regenerate_heatmap.py` — rebuild heatmaps from CSV in seconds (no 30-min re-run)
+
 ## Pending Tasks
+### Task A (Akbar)
+1. Compare predictions with Lucas's ground truth
+2. Re-run inference on fully cleaned data for final heatmap
+3. Share 3D point clouds with Dr. Zhou
+
+### Task B (Srikar)
 1. Fix oversized detection for uniformly-protruding crops (pig15-type cases)
 2. Characterize OAK-D ToF depth accuracy (paper reports 3.4±3.0mm for L515)
 3. Compute formal daily behavioral indices (SI, SLI, LLI, PCF) for estrus model input
 4. Build 1D CNN estrus detection model (DFW + behavior + vulva volume)
 5. Multi-day longitudinal vulva tracking across estrus cycle
+
+### Together
+1. Manual vulva labeling (40-50 samples) — label_vulva.py ready
+2. Compare labels with ground truth
 
 ## Data Locations
 - **Lab PC (Windows):** `C:\PAAL_data\Fed_pig\Pictures_OAk\`
