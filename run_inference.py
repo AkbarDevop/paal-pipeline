@@ -542,6 +542,222 @@ def generate_per_pig_heatmaps(results, out_dir):
     print(f"  Per-pig heatmaps: {pig_dir}/ ({len(pig_ids)} pigs)")
 
 
+def generate_per_pig_csvs(results, out_dir):
+    """Generate a separate CSV file for each pig ID."""
+    pig_dir = os.path.join(out_dir, "per_pig")
+    os.makedirs(pig_dir, exist_ok=True)
+
+    fields = ["timestamp_folder", "pig_id", "pig_timestamp",
+              "prediction", "prediction_name", "confidence",
+              "median_depth", "image_path"]
+
+    pig_ids = sorted(set(r["pig_id"] for r in results))
+    for pid in pig_ids:
+        pig_results = [r for r in results if r["pig_id"] == pid]
+        csv_path = os.path.join(pig_dir, f"pig{pid}_predictions.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(pig_results)
+
+    print(f"  Per-pig CSVs: {pig_dir}/ ({len(pig_ids)} pigs)")
+
+
+def generate_per_pig_excels(results, out_dir):
+    """Generate a separate Excel file for each pig ID."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        print("  openpyxl not installed, skipping per-pig Excel files")
+        return
+
+    pig_dir = os.path.join(out_dir, "per_pig")
+    os.makedirs(pig_dir, exist_ok=True)
+
+    fill_standing = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    fill_sitting  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    fill_lying    = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    fill_header   = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    font_header   = Font(bold=True, color="FFFFFF", size=11)
+    thin_border   = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    posture_fills = {"standing": fill_standing, "sitting": fill_sitting, "lying": fill_lying}
+
+    pig_ids = sorted(set(r["pig_id"] for r in results))
+
+    for pid in pig_ids:
+        pig_results = sorted(
+            [r for r in results if r["pig_id"] == pid],
+            key=lambda r: r["pig_timestamp"],
+        )
+        if not pig_results:
+            continue
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = f"Pig {pid}"
+
+        headers = ["Date", "Time", "Posture", "Confidence %", "Median Depth (mm)"]
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.fill = fill_header
+            cell.font = font_header
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = thin_border
+
+        for i, r in enumerate(pig_results, start=2):
+            t = parse_timestamp(r["pig_timestamp"])
+            ws.cell(row=i, column=1, value=t.strftime("%Y-%m-%d") if t else "")
+            ws.cell(row=i, column=2, value=t.strftime("%H:%M:%S") if t else "")
+            posture_cell = ws.cell(row=i, column=3, value=r["prediction_name"].capitalize())
+            ws.cell(row=i, column=4, value=round(r["confidence"] * 100, 1))
+            ws.cell(row=i, column=5, value=r["median_depth"])
+
+            fill = posture_fills.get(r["prediction_name"])
+            if fill:
+                posture_cell.fill = fill
+
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=i, column=col).border = thin_border
+                ws.cell(row=i, column=col).alignment = Alignment(horizontal="center")
+
+        for col in ws.columns:
+            max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 20)
+
+        wb.save(os.path.join(pig_dir, f"pig{pid}_report.xlsx"))
+
+    print(f"  Per-pig Excel files: {pig_dir}/ ({len(pig_ids)} pigs)")
+
+
+def generate_excel_report(results, out_path):
+    """Generate an Excel workbook with summary + per-pig sheets."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        print("  openpyxl not installed, skipping Excel report (pip install openpyxl)")
+        return
+
+    from collections import defaultdict
+
+    wb = Workbook()
+
+    # ── Color fills for postures ──
+    fill_standing = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")  # green
+    fill_sitting  = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")  # orange
+    fill_lying    = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")  # blue
+    fill_header   = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")  # dark blue
+    font_header   = Font(bold=True, color="FFFFFF", size=11)
+    font_bold     = Font(bold=True, size=11)
+    thin_border   = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    posture_fills = {"standing": fill_standing, "sitting": fill_sitting, "lying": fill_lying}
+
+    def style_header(ws, row, ncols):
+        for col in range(1, ncols + 1):
+            cell = ws.cell(row=row, column=col)
+            cell.fill = fill_header
+            cell.font = font_header
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = thin_border
+
+    # ── Sheet 1: Summary (daily stats per pig) ──
+    ws = wb.active
+    ws.title = "Summary"
+
+    # Build daily stats: {pig_id: {date_str: {standing, sitting, lying, total}}}
+    pig_ids = sorted(set(r["pig_id"] for r in results))
+    daily = defaultdict(lambda: defaultdict(lambda: {"standing": 0, "sitting": 0, "lying": 0, "total": 0}))
+    all_dates = set()
+    for r in results:
+        t = parse_timestamp(r["pig_timestamp"])
+        if t is None:
+            continue
+        date_str = t.strftime("%Y-%m-%d")
+        all_dates.add(date_str)
+        daily[r["pig_id"]][date_str][r["prediction_name"]] += 1
+        daily[r["pig_id"]][date_str]["total"] += 1
+    all_dates = sorted(all_dates)
+
+    # Header
+    headers = ["Pig ID", "Date", "Total Obs", "Standing", "Sitting", "Lying",
+               "Standing %", "Sitting %", "Lying %"]
+    for col, h in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=h)
+    style_header(ws, 1, len(headers))
+
+    row = 2
+    for pid in pig_ids:
+        for date_str in all_dates:
+            s = daily[pid][date_str]
+            if s["total"] == 0:
+                continue
+            t = s["total"]
+            ws.cell(row=row, column=1, value=f"Pig {pid}").font = font_bold
+            ws.cell(row=row, column=2, value=date_str)
+            ws.cell(row=row, column=3, value=t)
+            ws.cell(row=row, column=4, value=s["standing"])
+            ws.cell(row=row, column=5, value=s["sitting"])
+            ws.cell(row=row, column=6, value=s["lying"])
+            ws.cell(row=row, column=7, value=round(s["standing"] / t * 100, 1))
+            ws.cell(row=row, column=8, value=round(s["sitting"] / t * 100, 1))
+            ws.cell(row=row, column=9, value=round(s["lying"] / t * 100, 1))
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row, column=col).border = thin_border
+                ws.cell(row=row, column=col).alignment = Alignment(horizontal="center")
+            row += 1
+
+    # Auto-width
+    for col in ws.columns:
+        max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 20)
+
+    # ── Per-pig sheets ──
+    for pid in pig_ids:
+        pig_results = sorted(
+            [r for r in results if r["pig_id"] == pid],
+            key=lambda r: r["pig_timestamp"],
+        )
+        if not pig_results:
+            continue
+
+        ws = wb.create_sheet(title=f"Pig {pid}")
+        headers = ["Date", "Time", "Posture", "Confidence %", "Median Depth (mm)"]
+        for col, h in enumerate(headers, 1):
+            ws.cell(row=1, column=col, value=h)
+        style_header(ws, 1, len(headers))
+
+        for i, r in enumerate(pig_results, start=2):
+            t = parse_timestamp(r["pig_timestamp"])
+            ws.cell(row=i, column=1, value=t.strftime("%Y-%m-%d") if t else "")
+            ws.cell(row=i, column=2, value=t.strftime("%H:%M:%S") if t else "")
+            posture_cell = ws.cell(row=i, column=3, value=r["prediction_name"].capitalize())
+            ws.cell(row=i, column=4, value=round(r["confidence"] * 100, 1))
+            ws.cell(row=i, column=5, value=r["median_depth"])
+
+            # Color-code posture cell
+            fill = posture_fills.get(r["prediction_name"])
+            if fill:
+                posture_cell.fill = fill
+
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=i, column=col).border = thin_border
+                ws.cell(row=i, column=col).alignment = Alignment(horizontal="center")
+
+        for col in ws.columns:
+            max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 20)
+
+    wb.save(out_path)
+    print(f"  Excel report: {out_path}")
+
+
 def generate_timestamp_summary(results, out_path):
     """Generate per-timestamp-folder summary CSV."""
     from collections import defaultdict
@@ -664,13 +880,18 @@ def main():
 
     generate_heatmap(results, heatmap_path)
     generate_per_pig_heatmaps(results, out_dir)
+    generate_per_pig_csvs(results, out_dir)
+    generate_per_pig_excels(results, out_dir)
+    excel_path = os.path.join(out_dir, "posture_report.xlsx")
+    generate_excel_report(results, excel_path)
     generate_timestamp_summary(results, ts_summary_path)
 
     print_summary(results)
     print(f"\n  CSV:              {csv_path}")
     print(f"  Heatmap (all):    {heatmap_path}")
     print(f"  Heatmap (raw IDs):{heatmap_raw_path}")
-    print(f"  Per-pig heatmaps: {os.path.join(out_dir, 'per_pig')}/")
+    print(f"  Per-pig outputs:  {os.path.join(out_dir, 'per_pig')}/")
+    print(f"  Excel report:     {excel_path}")
     print(f"  Timestamp summary:{ts_summary_path}")
 
 
