@@ -55,54 +55,27 @@ def crop_box_for_size(w, h):
     return int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
 
 
-def cropped_path(original_path):
-    base, ext = os.path.splitext(original_path)
-    return base + "_cropped" + ext
+def load_and_crop_ir(ir_path, size=IMG_SIZE):
+    """Load raw IR jpg, crop to stall region, resize for model.
 
-
-def crop_all_images(data_dir):
-    """Crop all images in data_dir, skip already-cropped."""
-    folders = sorted(
-        d for d in os.listdir(data_dir)
-        if os.path.isdir(os.path.join(data_dir, d)) and d[0].isdigit()
-    )
-    print(f"[1/3] Cropping images in {len(folders)} folders...")
-
-    total = 0
-    skipped = 0
-    corrupt = 0
-    for folder in folders:
-        folder_path = os.path.join(data_dir, folder)
-        for fname in os.listdir(folder_path):
-            if not fname.endswith(".jpg") or "_cropped" in fname:
-                continue
-            if not re.match(r"^pig\d+_", fname):
-                continue
-
-            src = os.path.join(folder_path, fname)
-            dst = cropped_path(src)
-            if os.path.exists(dst):
-                skipped += 1
-                continue
-
-            # Check file size — corrupt JPEGs are often tiny (<1KB)
-            if os.path.getsize(src) < 1000:
-                corrupt += 1
-                continue
-
-            img = cv2.imread(src)
-            if img is None:
-                corrupt += 1
-                continue
-            h, w = img.shape[:2]
-            if h < 10 or w < 10:
-                corrupt += 1
-                continue
-            x1, y1, x2, y2 = crop_box_for_size(w, h)
-            cv2.imwrite(dst, img[y1:y2, x1:x2])
-            total += 1
-
-    print(f"  Cropped: {total} new, {skipped} already existed, {corrupt} corrupt/skipped")
+    Does everything in-memory — no disk write. Replaces the old
+    crop-to-disk step which saved *_cropped.jpg files.
+    """
+    if not ir_path or not os.path.exists(ir_path):
+        return None
+    if os.path.getsize(ir_path) < 1000:
+        return None  # corrupt
+    img = cv2.imread(ir_path)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if h < 10 or w < 10:
+        return None
+    x1, y1, x2, y2 = crop_box_for_size(w, h)
+    cropped = img[y1:y2, x1:x2]
+    cropped = cv2.resize(cropped, (size, size))
+    cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    return cropped
 
 
 # ── Step 2: Scan + prefilter + predict ────────────────────────────────────
@@ -181,11 +154,10 @@ def scan_folder(data_dir):
 
 
 def get_image_path(frame):
-    """Get cropped IR path, fall back to uncropped."""
-    for key in ("ir_cropped_jpg", "ir_jpg"):
-        p = frame.get(key, "")
-        if p and os.path.exists(p):
-            return p
+    """Get uncropped IR path (cropping now happens in-memory)."""
+    p = frame.get("ir_jpg", "")
+    if p and os.path.exists(p):
+        return p
     return ""
 
 
@@ -195,7 +167,7 @@ def run_predictions(data_dir, device, model):
         print("No frames found.")
         return []
 
-    print(f"[2/3] Running inference on {len(frames)} frames...")
+    print(f"[1/2] Running inference on {len(frames)} frames...")
 
     results = []
     skipped = 0
@@ -210,12 +182,12 @@ def run_predictions(data_dir, device, model):
                 skipped += 1
                 continue
 
-            # Load image — skip if missing or corrupt
+            # Load image, crop in memory, preprocess for model
             path = get_image_path(frame)
             if not path:
                 skipped_corrupt += 1
                 continue
-            img = load_and_preprocess(path)
+            img = load_and_crop_ir(path)
             if img is None:
                 skipped_corrupt += 1
                 continue
@@ -852,16 +824,13 @@ def main():
     model.eval()
     print(f"Model: {backbone}, {ckpt.get('num_classes', 3)} classes\n")
 
-    # Step 1: Crop
-    crop_all_images(data_dir)
-
-    # Step 2: Predict
+    # Step 1: Predict (cropping happens in-memory, no disk writes)
     results = run_predictions(data_dir, device, model)
     if not results:
         print("No predictions generated.")
         return
 
-    # Step 3: Save outputs
+    # Step 2: Save outputs
     csv_path = os.path.join(out_dir, "predictions.csv")
     heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
     heatmap_raw_path = os.path.join(out_dir, "posture_heatmap_raw_ids.png")
@@ -869,7 +838,7 @@ def main():
 
     # Save CSV with raw (unnormalized) pig IDs
     save_csv(results, csv_path)
-    print(f"\n[3/3] Generating outputs...")
+    print(f"\n[2/2] Generating outputs...")
 
     # Generate heatmap with RAW pig IDs (including overflow 20+)
     generate_heatmap_raw(results, heatmap_raw_path)
