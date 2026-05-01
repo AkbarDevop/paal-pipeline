@@ -56,26 +56,28 @@ def crop_box_for_size(w, h):
 
 
 def load_and_crop_ir(ir_path, size=IMG_SIZE):
-    """Load raw IR jpg, crop to stall region, resize for model.
+    """Load IR jpg, crop to stall region if not already cropped, resize for model.
 
-    Does everything in-memory — no disk write. Replaces the old
-    crop-to-disk step which saved *_cropped.jpg files.
+    If the filename ends with `_cropped.jpg` (legacy preprocessed data), the
+    image is already cropped — just resize. Otherwise crop the raw stall ROI
+    in-memory, then resize.
     """
     if not ir_path or not os.path.exists(ir_path):
         return None
     if os.path.getsize(ir_path) < 1000:
-        return None  # corrupt
+        return None
     img = cv2.imread(ir_path)
     if img is None:
         return None
     h, w = img.shape[:2]
     if h < 10 or w < 10:
         return None
-    x1, y1, x2, y2 = crop_box_for_size(w, h)
-    cropped = img[y1:y2, x1:x2]
-    cropped = cv2.resize(cropped, (size, size))
-    cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    return cropped
+    if "_cropped" not in ir_path:
+        x1, y1, x2, y2 = crop_box_for_size(w, h)
+        img = img[y1:y2, x1:x2]
+    img = cv2.resize(img, (size, size))
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    return img
 
 
 # ── Step 2: Scan + prefilter + predict ────────────────────────────────────
