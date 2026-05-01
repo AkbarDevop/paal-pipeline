@@ -161,28 +161,47 @@ def get_image_path(frame):
     return ""
 
 
-def run_predictions(data_dir, device, model):
+def load_pig_detector(model_dir, device):
+    """Load the binary pig-presence CNN. Returns None if weights not found."""
+    path = os.path.join(model_dir, "pig_detector.pth")
+    if not os.path.exists(path):
+        return None
+    import torchvision.models as tv_models
+    detector = tv_models.mobilenet_v2(weights=None)
+    detector.classifier[1] = torch.nn.Linear(detector.classifier[1].in_features, 2)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    detector.load_state_dict(ckpt["model_state_dict"])
+    detector.eval().to(device)
+    return detector
+
+
+def run_predictions(data_dir, device, model, detector=None):
     frames = scan_folder(data_dir)
     if not frames:
         print("No frames found.")
         return []
 
     print(f"[1/2] Running inference on {len(frames)} frames...")
+    if detector is None:
+        print("  (pig presence: depth prefilter only — detector model not loaded)")
+    else:
+        print("  (pig presence: depth prefilter + CNN detector)")
 
     results = []
-    skipped = 0
+    skipped_depth = 0
+    skipped_detector = 0
     skipped_corrupt = 0
 
     with torch.no_grad():
         for i, frame in enumerate(frames):
-            # Depth prefilter
+            # Step 1: Depth prefilter (cheap, rejects obvious empty stalls)
             depth_raw = frame.get("depth_raw", "")
             present, median_d = check_pig_present(depth_raw)
             if not present:
-                skipped += 1
+                skipped_depth += 1
                 continue
 
-            # Load image, crop in memory, preprocess for model
+            # Step 2: Load + crop IR image
             path = get_image_path(frame)
             if not path:
                 skipped_corrupt += 1
@@ -193,6 +212,17 @@ def run_predictions(data_dir, device, model):
                 continue
 
             x = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(device)
+
+            # Step 3: CNN pig-presence detector (catches what depth prefilter misses)
+            if detector is not None:
+                det_logits = detector(x)
+                det_probs = torch.softmax(det_logits, dim=1).cpu().numpy()[0]
+                # class 0 = empty, class 1 = present
+                if det_probs[1] < 0.5:
+                    skipped_detector += 1
+                    continue
+
+            # Step 4: Posture classification
             logits = model(x)
             probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
             pred = int(np.argmax(probs))
@@ -212,7 +242,10 @@ def run_predictions(data_dir, device, model):
             if (i + 1) % 500 == 0:
                 print(f"  {i + 1}/{len(frames)} frames...")
 
-    print(f"  Predicted: {len(results)}, Skipped (empty stall): {skipped}, Skipped (corrupt/missing): {skipped_corrupt}")
+    print(f"  Predicted: {len(results)}, "
+          f"Skipped (depth prefilter): {skipped_depth}, "
+          f"Skipped (CNN detector): {skipped_detector}, "
+          f"Skipped (corrupt/missing): {skipped_corrupt}")
     return results
 
 
@@ -822,10 +855,18 @@ def main():
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    print(f"Model: {backbone}, {ckpt.get('num_classes', 3)} classes\n")
+    print(f"Posture model: {backbone}, {ckpt.get('num_classes', 3)} classes")
+
+    # Load pig presence detector (binary CNN)
+    detector = load_pig_detector(MODEL_DIR, device)
+    if detector is not None:
+        print("Pig detector: MobileNetV2 (binary, present/empty)")
+    else:
+        print("Pig detector: NOT FOUND — falling back to depth prefilter only")
+    print()
 
     # Step 1: Predict (cropping happens in-memory, no disk writes)
-    results = run_predictions(data_dir, device, model)
+    results = run_predictions(data_dir, device, model, detector=detector)
     if not results:
         print("No predictions generated.")
         return

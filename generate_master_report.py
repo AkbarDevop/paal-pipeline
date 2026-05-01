@@ -33,7 +33,7 @@ GROUPS = [
         "name": "Feb Group (020626)",
         "short": "feb",
         "transitions_csv": os.path.join(OUTPUT_DIR, "posture_transitions_feb_all.csv"),
-        "predictions_csv": os.path.join(OUTPUT_DIR, "predictions_feb_combined.csv"),
+        "predictions_csv": os.path.join(OUTPUT_DIR, "predictions_feb_filtered.csv"),
         "estrus": r"C:\Users\aakdbx\Downloads\February 2026 Estrus.xlsx",
         "sow_source": "title",
     },
