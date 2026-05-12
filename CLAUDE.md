@@ -3,56 +3,69 @@
 ## What This Is
 OAK-D ToF camera pipeline for (A) classifying pig postures and (B) measuring vulva dimensions for automated estrus detection. Replicates methodology from Xu et al. (2023, 2024) — see docs/METHODOLOGY.md for full reference paper mapping.
 
+> **For the next maintainer: read [HANDOFF.md](HANDOFF.md) first.** It documents the full pipeline, known data quirks, and how to continue Task B.
+
 ## Quick Commands
 
 ### Task A: Run inference on new dataset
 ```bash
-python run_inference.py "C:\PAAL_data\Fed_pig\Pictures_OAk"   # Windows lab PC
-python run_inference.py /path/to/data                          # Mac
+python posture/run_inference.py "C:\PAAL_data\Fed_pig\Pictures_OAK"   # Windows lab PC
+python posture/run_inference.py /path/to/data                          # Mac
 ```
 
 ### Task B: Vulva measurement pipeline
 ```bash
-python build_depthmaps.py                                       # Step 1: depth → 3D point clouds (depthmap/)
-python build_vulva_rect_crops.py                                # Step 2: interactive vulva rectangle crop (depthmap_rect/)
-python build_paper_vulva_surfaces.py depthmap_rect/SESSION/PIG  # Step 3: paper-style surface analysis + measurements
-python label_vulva_length_width.py                              # Alt: manual L/W via IR point-click
-python compare_vulva_ground_truths.py                           # Validate vs caliper ground truth
+python vulva/build_depthmaps.py                                       # Step 1: depth → 3D point clouds (depthmap/)
+python vulva/build_vulva_rect_crops.py                                # Step 2: interactive vulva rectangle crop (depthmap_rect/)
+python vulva/build_paper_vulva_surfaces.py depthmap_rect/SESSION/PIG  # Step 3: paper-style surface analysis + measurements
+python vulva/label_vulva_length_width.py                              # Alt: manual L/W via IR point-click
 ```
 
 ### Other commands
 ```bash
-python infer_batch.py --data-dir /path/to/data          # Batch inference only
-python crop_images.py --data-dir /path/to/data           # Crop only
-python point_cloud.py --depth-raw X --ir-img Y           # Single pig point cloud + mesh
-python view_pointcloud.py depthmap/SESSION/PIG            # Interactive 3D viewer
-python extract_rear_view_pig_manual.py INPUT              # Manual polygon rear-view extraction
+python posture/infer_batch.py --data-dir /path/to/data    # Batch inference only
+python posture/crop_images.py --data-dir /path/to/data    # Crop only
+python vulva/point_cloud.py --depth-raw X --ir-img Y      # Single pig point cloud + mesh
+python vulva/view_pointcloud.py depthmap/SESSION/PIG      # Interactive 3D viewer
+python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-view extraction
 ```
 
 ## Project Structure
 
-### Task A (Posture — COMPLETE)
-- `run_inference.py` — Single-command pipeline (crop + predict + heatmap)
-- `infer_batch.py` — Batch inference with depth prefilter
-- `crop_images.py` — Crop OAK-D images to stall region
-- `train.py` / `eval.py` — Model training and evaluation
-- `models.py` — MobileNetV2/Xception/DenseNet121 architectures
-- `data_loader.py` — PyTorch Dataset with pig-ID splits
-- `config.py` — All paths, crop boxes, class definitions
+### Task A (Posture — COMPLETE, lives in `posture/`)
+- `posture/run_inference.py` — Single-command pipeline (crop → CNN pig detector → posture classify → heatmap → CSV → Excel)
+- `posture/infer_batch.py` — Batch inference only
+- `posture/crop_images.py` — Crop OAK-D images to stall region
+- `posture/train.py` / `posture/eval.py` — Model training and evaluation
+- `posture/train_pig_detector.py` — CNN pig-presence detector (replaces depth-only prefilter)
+- `posture/filter_predictions.py` — Apply trained detector to existing predictions.csv
+- `posture/count_posture_changes.py` — Nighttime transition counts vs Lucas's estrus ground truth
+- `posture/generate_master_report.py` — Per-pig + master Excel workbook with daily statistics
+- `posture/regenerate_heatmap.py` — Rebuild heatmap from predictions.csv (~seconds)
+- `posture/audit_data.py` — Scan timestamp folders, report missing/overflow pig IDs
+- `posture/fix_pig_ids.py` / `posture/fix_predictions_csv.py` — Camera magnet/overflow corrections
+- `posture/models.py` — MobileNetV2/Xception/DenseNet121 architectures
+- `posture/data_loader.py` — PyTorch Dataset with pig-ID splits
+- `config.py` (repo root) — All paths, crop boxes, class definitions; shared with vulva/
 - `models/posture3_ir_best.pth` — Trained MobileNetV2 IR model (8.7MB, 98.4%)
+- `models/pig_detector_best.pth` — CNN pig-presence detector
 
-### Task B (Vulva — IN PROGRESS)
-- `point_cloud.py` — Core 3D engine: depth backprojection, pig segmentation, vulva IR detection
-- `build_depthmaps.py` — Batch: all depth_*.raw → depthmap/ (232 pigs processed)
-- `crop_vulva_pointcloud.py` — Interactive vulva rectangle selection + cropped 3D export
-- `build_vulva_rect_crops.py` — Batch driver for rectangle crops → depthmap_rect/
-- `build_paper_vulva_surfaces.py` — Paper-style: plane fit → 300×300 OS → seed detect → dilate 35% → inpaint → measure
-- `label_vulva_length_width.py` — Manual L/W annotation via IR point-click with 3D backprojection
-- `compare_vulva_ground_truths.py` — Validate measured vs caliper ground truth
-- `label_vulva.py` — Interactive vulva quality + polygon annotation
-- `extract_rear_view_pig_manual.py` — Manual polygon rear-view extraction
-- `view_pointcloud.py` — Interactive 3D PLY/OBJ viewer
-- `render_depthmaps.py` — Regenerate depth portraits from bundles
+### Task B (Vulva — IN PROGRESS, lives in `vulva/`)
+- `vulva/point_cloud.py` — Core 3D engine: depth backprojection, pig segmentation, vulva IR detection
+- `vulva/build_depthmaps.py` — Batch: all depth_*.raw → depthmap/ (232 pigs processed)
+- `vulva/crop_vulva_pointcloud.py` — Interactive vulva rectangle selection + cropped 3D export
+- `vulva/build_vulva_rect_crops.py` — Batch driver for rectangle crops → depthmap_rect/
+- `vulva/build_paper_vulva_surfaces.py` — Paper-style: plane fit → 300×300 OS → seed detect → dilate 35% → inpaint → measure
+- `vulva/label_vulva_length_width.py` — Manual L/W annotation via IR point-click with 3D backprojection
+- `vulva/label_vulva.py` — Interactive vulva quality + polygon annotation
+- `vulva/measure_vulva_dataset.py` / `vulva/measure_vulva_manual.py` — Measurement pipelines
+- `vulva/extract_rear_view_pig_manual.py` — Manual polygon rear-view extraction
+- `vulva/view_pointcloud.py` — Interactive 3D PLY/OBJ viewer
+- `vulva/render_depthmaps.py` — Regenerate depth portraits from bundles
+
+### Other top-level
+- `PAAL_Posture_Classification.ipynb` — Self-contained Colab notebook for non-CS users
+- `archive/` — Old exploratory scripts (see `archive/README.md` for what's there and why)
 
 ## Key Technical Details
 - **Task A Model**: MobileNetV2 on IR modality, 3 classes, 98.4% test accuracy
@@ -111,29 +124,29 @@ All corrections are scripted in `fix_pig_ids.py` and `fix_predictions_csv.py`:
 - **Clean data window: 02/23–03/12** (17 days, clear posture cycles)
 
 ### Tools Built
-- `audit_data.py` — scan folders, report missing/overflow pig IDs
-- `detect_missing_pigs.py` — depth-based comparison for < 20 pig folders
-- `detect_id_shifts.py` — stall depth fingerprinting (inconclusive — stalls equidistant)
-- `fix_pig_ids.py` — apply file rename/delete corrections (with --dry-run)
-- `fix_predictions_csv.py` — apply same corrections to predictions CSV
-- `regenerate_heatmap.py` — rebuild heatmaps from CSV in seconds (no 30-min re-run)
+- `posture/audit_data.py` — scan folders, report missing/overflow pig IDs
+- `archive/detect_missing_pigs.py` — depth-based comparison for < 20 pig folders (archived)
+- `archive/detect_id_shifts.py` — stall depth fingerprinting (inconclusive — stalls equidistant, archived)
+- `posture/fix_pig_ids.py` — apply file rename/delete corrections (with --dry-run)
+- `posture/fix_predictions_csv.py` — apply same corrections to predictions CSV
+- `posture/regenerate_heatmap.py` — rebuild heatmaps from CSV in seconds (no 30-min re-run)
 
-## Pending Tasks
-### Task A (Akbar)
-1. Compare predictions with Lucas's ground truth
-2. Re-run inference on fully cleaned data for final heatmap
-3. Share 3D point clouds with Dr. Zhou
+## Status
 
-### Task B (Srikar)
-1. Fix oversized detection for uniformly-protruding crops (pig15-type cases)
-2. Characterize OAK-D ToF depth accuracy (paper reports 3.4±3.0mm for L515)
-3. Compute formal daily behavioral indices (SI, SLI, LLI, PCF) for estrus model input
-4. Build 1D CNN estrus detection model (DFW + behavior + vulva volume)
-5. Multi-day longitudinal vulva tracking across estrus cycle
+**Task A (Posture Classification): SHIPPED.**
+- 98.4% test accuracy on held-out pigs 16–19
+- Lucas's estrus ground truth comparison wired into `posture/count_posture_changes.py` (validated signal: pig 9 = +12.8 transitions on heat days, pig 14 = +10.1)
+- Monthly inference is a one-command operation: `python posture/run_inference.py /path/to/data`
+- Colab notebook for non-technical users: <https://colab.research.google.com/github/AkbarDevop/paal-pipeline/blob/main/PAAL_Posture_Classification.ipynb>
+- CNN pig-presence detector replaced the depth-only prefilter (drops 100% of empty-stall false positives)
+- Outputs: posture heatmap, predictions CSV, per-pig Excel, master Excel workbook
 
-### Together
-1. Manual vulva labeling (40-50 samples) — label_vulva.py ready
-2. Compare labels with ground truth
+**Task B (Vulva Segmentation): IN PROGRESS.**
+- 232 pig 3D point clouds generated, 48 valid vulva crops, paper-style measurement pipeline operational
+- Known issue: oversized detection on uniformly-protruding crops (pig15-type)
+- Open work (for whoever continues): fix detection for uniformly-protruding crops, characterize OAK-D ToF accuracy, compute behavioral indices (SI/SLI/LLI/PCF), build 1D CNN estrus detection model, multi-day longitudinal vulva tracking
+
+**See [HANDOFF.md](HANDOFF.md) for the full continuation guide.**
 
 ## Data Locations
 - **Lab PC (Windows):** `C:\PAAL_data\Fed_pig\Pictures_OAk\`

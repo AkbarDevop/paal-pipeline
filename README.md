@@ -4,6 +4,31 @@
 
 Built for the Precision Animal Agriculture Lab (PAAL) at the University of Missouri. Classifies sow postures from multi-modal camera feeds (RGB, IR, Depth) to enable automated welfare monitoring — tracking how much time each sow spends in each posture throughout the day.
 
+> **Continuing this project? Read [HANDOFF.md](HANDOFF.md) first.** It documents the one-command monthly inference flow, known data quirks, and where Task A ends and Task B begins.
+
+## Quick start
+
+```bash
+# Posture inference on a month of OAK-D data (the main thing)
+python posture/run_inference.py /path/to/data
+
+# Or use the Colab notebook (zero setup):
+# https://colab.research.google.com/github/AkbarDevop/paal-pipeline/blob/main/PAAL_Posture_Classification.ipynb
+```
+
+## Repository layout
+
+```
+paal-pipeline/
+├── HANDOFF.md                ← read this first
+├── config.py                 ← shared paths/constants
+├── posture/                  ← Task A: posture classification (production, 98.4%)
+├── vulva/                    ← Task B: vulva measurement (in progress)
+├── archive/                  ← exploratory/dead scripts (see archive/README.md)
+├── labels/  models/  outputs/  docs/
+└── PAAL_Posture_Classification.ipynb   ← Colab notebook (self-contained)
+```
+
 ## Key Results
 
 | Metric | Value |
@@ -17,26 +42,28 @@ Built for the Precision Animal Agriculture Lab (PAAL) at the University of Misso
 ## Pipeline Overview
 
 ```
-OAK-D ToF Camera → Depth Prefilter (pig present?) → Crop ROI → MobileNetV2 → Posture Prediction
+OAK-D ToF Camera → Crop ROI → CNN Pig-Presence Detector → MobileNetV2 Posture Classifier
+                                                                      ↓
+                                          Heatmap + Predictions CSV + Excel Reports
 ```
 
-The full pipeline:
+The production inference pipeline is wrapped in a single command:
 
-```text
-scan_data.py          Scan raw OAK exports → labels/metadata.csv
-        ↓
-prefilter_depth.py    Depth-based pig presence filter → labels/presence_filter.csv
-        ↓
-label_tool.py         Manual posture labeling GUI → labels/labels_posture3.csv
-        ↓
-crop_images.py        Crop ROI to remove neighbor pigs & ceiling
-        ↓
-train.py              Train classifier (3 backbones × 3 modalities) → models/*.pth
-        ↓
-eval.py               Evaluate on held-out test pigs → confusion matrices, per-class metrics
-        ↓
-pretrain_sowbot.py    (Optional) Pre-train on external sowbot 2022 IR dataset
+```bash
+python posture/run_inference.py /path/to/data
 ```
+
+It performs: crop → pig detection → posture classification → heatmap → CSV → per-pig Excel + master workbook.
+
+To re-train the model from scratch:
+
+```bash
+python posture/train.py --modality ir --class-set posture3   # Trains posture classifier
+python posture/train_pig_detector.py                          # Trains pig presence detector
+python posture/eval.py                                        # Evaluates on held-out pigs 16–19
+```
+
+Earlier exploratory scripts (`scan_data.py`, `prefilter_depth.py`, `label_tool.py`, etc.) are preserved in [`archive/`](archive/README.md) for reference.
 
 ## Features
 
@@ -51,64 +78,39 @@ pretrain_sowbot.py    (Optional) Pre-train on external sowbot 2022 IR dataset
 
 ## Quick Start
 
-### 1. Build metadata from raw OAK exports
+### Inference (production)
 
 ```bash
-python3 scan_data.py
+python posture/run_inference.py /path/to/data
 ```
 
-### 2. (Optional) Filter out empty frames
+This is the one-command monthly pipeline: crop → detect pig presence → classify posture → heatmap + CSV + Excel reports. Output lands in `outputs/`.
+
+### Re-training the models
 
 ```bash
-python3 prefilter_depth.py
-```
-
-### 3. Label data
-
-```bash
-python3 label_tool.py --class-set posture3
-```
-
-### 4. Crop images (remove neighbor pigs)
-
-```bash
-python3 crop_images.py
-```
-
-### 5. Train (e.g., MobileNetV2 on IR with class weights)
-
-```bash
-python3 train.py --modality ir --backbone mobilenet_v2 --num-classes 3 \
+# Posture classifier (3 classes)
+python posture/train.py --modality ir --backbone mobilenet_v2 --num-classes 3 \
   --labels-csv labels/labels_posture3.csv --model-prefix posture3 \
   --use-cropped --class-weights
-```
 
-### 6. Evaluate on held-out test pigs
-
-```bash
-python3 eval.py --model-prefix posture3 --class-set posture3 --num-classes 3 \
+# Evaluate on held-out pigs 16–19
+python posture/eval.py --model-prefix posture3 --class-set posture3 --num-classes 3 \
   --labels-csv labels/labels_posture3.csv --use-cropped
-```
 
-### 7. (Optional) Pre-train on sowbot 2022 dataset, then fine-tune
-
-```bash
-python3 pretrain_sowbot.py --backbone mobilenet_v2 --epochs 30
-python3 train.py --modality ir --backbone mobilenet_v2 \
-  --init-weights models/sowbot_mobilenet_v2_best.pth \
-  --model-prefix posture3ft --labels-csv labels/labels_posture3.csv \
-  --num-classes 3 --use-cropped --class-weights --lr 1e-5
+# Pig-presence detector (binary)
+python posture/train_pig_detector.py
 ```
 
 ## Setup for New Machine
 
-The code is on GitHub, but data (15GB) and models (914MB) are too large for git.
+The code is on GitHub, but data (~15 GB) and models (~30 MB) are not committed.
 
-1. **Clone the repo**: `git clone https://github.com/AkbarDevop/paal-pipeline.git`
+1. **Clone**: `git clone https://github.com/AkbarDevop/paal-pipeline.git`
 2. **Install dependencies**: `pip install -r requirements.txt`
-3. **Get data**: Download `data/` from the shared Google Drive folder and place it inside the repo root
-4. **Get models** (optional): Download `models/` from Google Drive for pre-trained checkpoints
-5. **Run pipeline**: `python3 run_pipeline.py --all` or run individual steps below
+3. **Get data**: Download the OAK-D timestamp folders from the shared Google Drive / OneDrive and place them anywhere on disk (you'll pass the path to `run_inference.py`)
+4. **Get models**: Download from the GitHub release: <https://github.com/AkbarDevop/paal-pipeline/releases/tag/v1.0> and place in `models/`
+5. **Run inference**: `python posture/run_inference.py /path/to/data`
 
 Label CSVs in `labels/` contain absolute paths from the original machine. The pipeline resolves these automatically via `config.resolve_path()` — no manual path editing needed.
 
@@ -118,10 +120,10 @@ Annotate vulva regions on standing pig images for swelling detection.
 
 ```bash
 # Label vulva polygons on standing frames (uses RGB for labeling)
-python3 label_vulva.py                    # All standing frames
-python3 label_vulva.py --pig 5            # Only pig 5
-python3 label_vulva.py --show-depth       # Show depth side-by-side
-python3 label_vulva.py --use-cropped      # Use cropped images
+python vulva/label_vulva.py                    # All standing frames
+python vulva/label_vulva.py --pig 5            # Only pig 5
+python vulva/label_vulva.py --show-depth       # Show depth side-by-side
+python vulva/label_vulva.py --use-cropped      # Use cropped images
 ```
 
 Workflow: classify frame quality (good/tail_closed/too_close/bad) → if good, draw polygon → saves binary mask PNG + coordinates to CSV.
@@ -134,12 +136,12 @@ Build a pig-scale 3D reconstruction from one depth frame plus the matching IR im
 
 ```bash
 # Build a pig point cloud + textured mesh from one frame
-python3 point_cloud.py \
+python vulva/point_cloud.py \
   --depth-raw images/20260211-09-17-32/pig0_depth_20260211-09-17-49.raw \
   --ir-img images/20260211-09-17-32/pig0_ir_vis_20260211-09-17-49.jpg
 
 # Later: pass a binary mask to keep only the vulva region
-python3 point_cloud.py \
+python vulva/point_cloud.py \
   --depth-raw /path/to/pig_depth.raw \
   --ir-img /path/to/pig_ir_vis.jpg \
   --mask /path/to/vulva_mask.png
@@ -197,32 +199,51 @@ The tool uses the IR/depth-aligned frame plus ToF intrinsics to convert the clic
 ## Project Structure
 
 ```
-paal_pipeline/
-├── config.py                  # Central configuration (paths, splits, classes)
-├── models.py                  # SingleModalModel (MobileNetV2/Xception/DenseNet121)
-├── data_loader.py             # Dataset & dataloader with pig-ID splits
-├── train.py                   # Training script with class weights & fine-tuning
-├── eval.py                    # Evaluation with per-class metrics & plots
-├── pretrain_sowbot.py         # Pre-train on sowbot 2022 IR dataset
-├── scan_data.py               # Index raw OAK timestamp folders
-├── prefilter_depth.py         # Depth-based pig presence detection
-├── crop_images.py             # Crop ROI from raw frames
-├── label_tool.py              # Manual posture labeling GUI (Task A)
-├── label_vulva.py             # Vulva polygon annotation tool (Task B)
-├── point_cloud.py             # Depth raw + IR -> pig point cloud + textured mesh
-├── find_sitting.py            # Scan for sitting candidates in unlabeled data
-├── infer_random.py            # Quick inference on random samples
-├── align_images.py            # Align RGB/IR/depth modalities
-├── make_slides.py             # Generate weekly meeting slides
-├── validate_pig_detection.py  # Validate depth prefilter accuracy
-├── plot_pretrain_comparison.py  # Sowbot vs from-scratch comparison visuals
-├── plot_pipeline_summary.py     # Presentation-ready summary figures
-├── labels/                    # Label CSVs and backups
-│   ├── vulva_labels.csv       # Vulva annotations (Task B)
-│   └── vulva_masks/           # Binary mask PNGs (Task B)
-├── models/                    # Saved model checkpoints (not tracked)
-├── outputs/                   # Evaluation results and figures (not tracked)
-└── data/                      # Raw OAK exports (not tracked)
+paal-pipeline/
+├── HANDOFF.md                 # Onboarding doc for the next maintainer
+├── README.md                  # This file
+├── CLAUDE.md                  # Project notes, decisions, history
+├── config.py                  # Shared paths/constants (used by both tasks)
+├── requirements.txt
+├── PAAL_Posture_Classification.ipynb   # Colab notebook (self-contained)
+│
+├── posture/                   # Task A — posture classification (production)
+│   ├── run_inference.py       # MAIN ENTRY: one-command monthly pipeline
+│   ├── crop_images.py
+│   ├── models.py              # MobileNetV2 / Xception / DenseNet121 wrappers
+│   ├── data_loader.py
+│   ├── train.py
+│   ├── train_pig_detector.py  # CNN pig-presence detector (replaces depth prefilter)
+│   ├── filter_predictions.py
+│   ├── eval.py
+│   ├── infer_batch.py
+│   ├── count_posture_changes.py     # Transitions vs estrus ground truth
+│   ├── generate_master_report.py    # Per-pig and master Excel workbook
+│   ├── regenerate_heatmap.py
+│   ├── audit_data.py
+│   ├── fix_pig_ids.py               # Camera magnet/overflow corrections
+│   └── fix_predictions_csv.py
+│
+├── vulva/                     # Task B — vulva segmentation/measurement (in progress)
+│   ├── point_cloud.py         # Core 3D engine
+│   ├── build_depthmaps.py
+│   ├── build_vulva_rect_crops.py
+│   ├── build_paper_vulva_surfaces.py
+│   ├── crop_vulva_pointcloud.py
+│   ├── label_vulva.py
+│   ├── label_vulva_length_width.py
+│   ├── measure_vulva_dataset.py
+│   ├── measure_vulva_manual.py
+│   ├── view_pointcloud.py
+│   ├── extract_rear_view_pig_manual.py
+│   └── render_depthmaps.py
+│
+├── archive/                   # Exploratory / dead scripts (see archive/README.md)
+│
+├── labels/                    # Label CSVs and binary masks
+├── models/                    # Trained model weights (not tracked, download from release)
+├── outputs/                   # Inference outputs (not tracked, generated locally)
+└── docs/                      # Methodology and reference notes
 ```
 
 ## Modalities
