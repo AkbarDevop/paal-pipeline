@@ -29,7 +29,21 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from config import IMAGE_DIR, VULVA_LENGTH_WIDTH_CSV
 from point_cloud import load_calibration, load_depth_raw
-from scan_data import parse_filename
+
+import re
+_FNAME_PATTERN = re.compile(r"^pig(\d+)_(depth_vis|depth|ir_vis|ir|rgb_aligned|rgb)_(\d{8}-\d{2}-\d{2}-\d{2})(_cropped)?\.(jpg|raw)$")
+
+def parse_filename(name):
+    m = _FNAME_PATTERN.match(name)
+    if not m:
+        return None
+    return {
+        "pig_id": int(m.group(1)),
+        "modality": m.group(2),
+        "timestamp": m.group(3),
+        "cropped": m.group(4) is not None,
+        "ext": m.group(5),
+    }
 
 
 WINDOW_NAME = "Vulva Length/Width Labeling"

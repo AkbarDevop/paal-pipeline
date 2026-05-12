@@ -48,7 +48,7 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 - `posture/data_loader.py` — PyTorch Dataset with pig-ID splits
 - `config.py` (repo root) — All paths, crop boxes, class definitions; shared with vulva/
 - `models/posture3_ir_best.pth` — Trained MobileNetV2 IR model (8.7MB, 98.4%)
-- `models/pig_detector_best.pth` — CNN pig-presence detector
+- `models/pig_detector.pth` — CNN pig-presence detector
 
 ### Task B (Vulva — IN PROGRESS, lives in `vulva/`)
 - `vulva/point_cloud.py` — Core 3D engine: depth backprojection, pig segmentation, vulva IR detection

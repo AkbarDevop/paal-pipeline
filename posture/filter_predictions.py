@@ -20,8 +20,12 @@ import numpy as np
 import torch
 import torchvision.models as tv_models
 
+import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from config import MODEL_DIR
+
 NETWORK_BASE = "//umad.umsystem.edu/rde/zhoujianf-lab/Pig project/Sow Data/Pictures_OAK"
-DETECTOR_PATH = "models/pig_detector.pth"
+DETECTOR_PATH = os.path.join(MODEL_DIR, "pig_detector.pth")
 IMG_SIZE = 224
 THRESHOLD = 0.5  # p_present >= 0.5 means pig present
 

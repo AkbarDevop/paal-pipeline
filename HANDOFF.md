@@ -63,7 +63,7 @@ That single command does the whole pipeline:
 
 Both must exist in `models/`:
 - `posture3_ir_best.pth` (8.7 MB) — the posture classifier (3 classes)
-- `pig_detector_best.pth` — the CNN pig-presence detector
+- `pig_detector.pth` — the CNN pig-presence detector
 
 If missing, both can be downloaded from the GitHub release: <https://github.com/AkbarDevop/paal-pipeline/releases/tag/v1.0>
 
@@ -139,7 +139,7 @@ python posture/eval.py
 python posture/train_pig_detector.py
 ```
 
-Uses auto-labeled IR frames (depth < 1463 mm = pig present, else empty stall). Balanced across standing / sitting / lying. Outputs `models/pig_detector_best.pth`.
+Uses auto-labeled IR frames (depth < 1463 mm = pig present, else empty stall). Balanced across standing / sitting / lying. Outputs `models/pig_detector.pth`.
 
 ---
 

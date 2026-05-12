@@ -28,9 +28,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import torchvision.models as models
 
-LABELS_CSV = "labels/pig_presence/auto_labels_v3.csv"
-LOCAL_DATA = Path("labels/pig_presence/data")
-MODEL_OUT = "models/pig_detector.pth"
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import BASE_DIR, MODEL_DIR
+
+LABELS_CSV = os.path.join(BASE_DIR, "labels/pig_presence/auto_labels_v3.csv")
+LOCAL_DATA = Path(BASE_DIR) / "labels/pig_presence/data"
+MODEL_OUT = os.path.join(MODEL_DIR, "pig_detector.pth")
 IMG_SIZE = 224
 NETWORK_BASE = "//umad.umsystem.edu/rde/zhoujianf-lab/Pig project/Sow Data/Pictures_OAK"
 
