@@ -9,6 +9,9 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from collections import Counter
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import BATCH_SIZE, IMG_SIZE, LABELS_CSV, TEST_PIG_IDS, TRAIN_PIG_IDS, VAL_PIG_IDS, resolve_path
 
 

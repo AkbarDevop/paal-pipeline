@@ -30,6 +30,9 @@ try:
 except ImportError:
     HAS_PLT = False
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import CROP_TOF, MODEL_DIR, OUTPUT_DIR, POSTURE3_CLASSES, IMG_SIZE
 from models import SingleModalModel
 from data_loader import MODALITY_CHANNELS, load_and_preprocess

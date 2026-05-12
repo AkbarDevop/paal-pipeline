@@ -24,6 +24,9 @@ import time
 import cv2
 import numpy as np
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import IMAGE_DIR, VULVA_LENGTH_WIDTH_CSV
 from point_cloud import load_calibration, load_depth_raw
 from scan_data import parse_filename

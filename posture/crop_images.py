@@ -14,6 +14,9 @@ import re
 
 import cv2
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import CROP_TOF, DATA_DIR
 
 TOF_W, TOF_H = 640, 480

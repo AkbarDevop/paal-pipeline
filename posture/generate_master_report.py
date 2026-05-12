@@ -26,6 +26,9 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import OUTPUT_DIR
 
 GROUPS = [

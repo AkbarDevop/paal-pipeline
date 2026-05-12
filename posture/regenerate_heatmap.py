@@ -28,6 +28,9 @@ except ImportError:
     print("matplotlib required: pip install matplotlib")
     sys.exit(1)
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import OUTPUT_DIR, POSTURE3_CLASSES
 from datetime import datetime, timedelta
 from collections import defaultdict

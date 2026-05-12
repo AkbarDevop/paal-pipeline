@@ -17,6 +17,9 @@ try:
 except ImportError:
     HAS_PLT = False
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import BATCH_SIZE, BINARY_CLASSES, POSTURE3_CLASSES, LABELS_CSV, MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS
 from data_loader import MODALITY_CHANNELS, SowPostureDataset
 from models import BACKBONES, SingleModalModel

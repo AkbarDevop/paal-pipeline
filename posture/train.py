@@ -9,6 +9,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import (
     BATCH_SIZE,
     LEARNING_RATE,

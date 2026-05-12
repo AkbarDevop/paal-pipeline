@@ -19,3 +19,4 @@ depthmap_rect/
 
 # Local tooling
 .claude/
+.vscode/

@@ -20,6 +20,9 @@ from datetime import datetime, timedelta
 
 import openpyxl
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import OUTPUT_DIR
 
 

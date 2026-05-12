@@ -24,6 +24,9 @@ raise SystemExit(0)
 import cv2
 import numpy as np
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from config import VULVA_MANUAL_LABELS_CSV
 from measure_vulva_manual import load_frame_context, process_vulva_measurement, repo_root
 
