@@ -243,6 +243,8 @@ def main(args):
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     normalize, crop = ckpt_preprocessing(ckpt)
+    if args.no_crop:
+        crop = False
     print(f"Loaded model: {model_path} ({backbone}, {num_classes} classes, normalize={normalize})")
 
     class_names = POSTURE3_CLASSES
@@ -372,6 +374,8 @@ if __name__ == "__main__":
                     help="Model prefix (default: posture3)")
     p.add_argument("--use-cropped", action="store_true",
                     help="Use cropped images (must run crop_images.py first)")
+    p.add_argument("--no-crop", action="store_true",
+                    help="Feed whole frames (v1.0 infer_batch behaviour) instead of the stall crop")
     p.add_argument("--skip-prefilter", action="store_true",
                     help="Skip depth prefilter (predict on all frames)")
     p.add_argument("--save-grid", action="store_true",

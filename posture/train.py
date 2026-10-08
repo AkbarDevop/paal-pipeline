@@ -129,24 +129,26 @@ class ArrayDataset(torch.utils.data.Dataset):
 
     def __init__(self, images, labels, augment=False):
         self.images, self.labels, self.augment = images, labels, augment
-        self.tf = None
+        self.geo = self.color = None
         if augment:
             from torchvision.transforms import v2 as T
-            self.tf = T.Compose([
+            # geometry is applied once to all channels so fused modalities stay aligned
+            self.geo = T.Compose([
                 T.RandomHorizontalFlip(0.5),
                 T.RandomAffine(degrees=5, translate=(0.04, 0.04), scale=(0.95, 1.05)),
-                T.ColorJitter(brightness=0.25, contrast=0.25),
             ])
+            self.color = T.ColorJitter(brightness=0.25, contrast=0.25)
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, i):
         x = torch.from_numpy(np.ascontiguousarray(self.images[i].transpose(2, 0, 1)))
-        if self.tf is not None:
+        if self.geo is not None:
+            x = self.geo(x)
             c = x.shape[0]
-            # ColorJitter expects 1 or 3 channels: jitter each 3-channel modality block together
-            x = torch.cat([self.tf(x[k:k + 3]) for k in range(0, c, 3)], 0) if c > 3 else self.tf(x)
+            # ColorJitter works on 3-channel images: jitter each modality block on its own
+            x = torch.cat([self.color(x[k:k + 3]) for k in range(0, c, 3)], 0) if c > 3 else self.color(x)
         return x.float().div_(255.0), int(self.labels[i])
 
 
@@ -283,6 +285,8 @@ def main(args):
     elif args.class_set == "binary":
         args.num_classes = 2
         class_names = BINARY_CLASSES
+        if args.model_prefix == "posture3":
+            args.model_prefix = "standing"
     else:
         class_names = POSTURE3_CLASSES if args.num_classes == 3 else BINARY_CLASSES
 
@@ -323,6 +327,11 @@ def main(args):
 
     if args.cv:
         pig_counts = Counter(map(int, pigs))
+        if len(pig_counts) < 3:
+            sys.exit(f"--cv needs at least 3 pigs with labels (found {len(pig_counts)})")
+        if args.cv > len(pig_counts):
+            print(f"Only {len(pig_counts)} pigs: using {len(pig_counts)} folds instead of {args.cv}")
+            args.cv = len(pig_counts)
         folds = assign_folds(pig_counts, args.cv, args.seed)
         print(f"\nGrouped {args.cv}-fold CV by pig: {folds}")
         oof = np.full(len(samples), -1)
@@ -333,6 +342,8 @@ def main(args):
             te = np.where(np.isin(pigs, list(test_p)))[0]
             va = np.where(np.isin(pigs, list(val_p)))[0]
             tr = np.where(~np.isin(pigs, list(test_p | val_p)))[0]
+            if len(te) == 0 or len(va) == 0 or len(tr) == 0:
+                sys.exit(f"fold {i + 1}: empty train/val/test split — use fewer folds")
             set_seed(args.seed + i)
             model, info = train_one(images, labels, tr, va, args, recipe, n_classes, device,
                                     log_prefix=f"[fold {i + 1}] ")
@@ -401,8 +412,9 @@ def main(args):
 def build_parser():
     p = argparse.ArgumentParser(description="Train posture classifier")
     p.add_argument("--modality", default="ir", choices=list(MODALITY_CHANNELS))
-    p.add_argument("--class-set", choices=["binary", "posture3"], default=None,
-                   help="Shortcut: posture3 = 3 classes + labels/labels_posture3.csv")
+    p.add_argument("--class-set", choices=["binary", "posture3"], default="posture3",
+                   help="posture3 (default) = 3 classes + labels/labels_posture3.csv; "
+                        "binary = standing vs not (labels/labels.csv)")
     p.add_argument("--num-classes", type=int, default=2, choices=[2, 3])
     p.add_argument("--labels-csv", default=LABELS_CSV)
     p.add_argument("--model-prefix", default="posture3")

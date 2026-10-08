@@ -156,10 +156,15 @@ def _notebook_pipeline_namespace():
 
 
 def test_notebook_has_same_corrections_and_no_modulo():
+    import inspect
     import json
     import id_corrections
     ns = _notebook_pipeline_namespace()
     assert ns["CORRECTIONS"] == id_corrections.CORRECTIONS, "notebook CORRECTIONS out of sync"
+    for fn in ("apply_corrections", "active_rules", "dedupe", "assign_ids"):
+        assert inspect.getsource(getattr(id_corrections, fn)).strip() in "".join(
+            json.load(open(os.path.join(ROOT, "PAAL_Posture_Classification.ipynb")))["cells"][8]["source"]), \
+            f"notebook copy of {fn} out of sync with posture/id_corrections.py"
     nb = json.load(open(os.path.join(ROOT, "PAAL_Posture_Classification.ipynb")))
     code = "".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
     assert "% 20" not in code, "notebook still maps pig IDs with % 20"
@@ -240,6 +245,42 @@ def test_ground_truth_sheet_parsing():
         assert {g["label"] for g in first if g["pig_id"] == 0} == {"lying"}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_rules_not_applied_twice_to_corrected_data():
+    # v1.0 fix scripts already turned pig20 into pig19 here: re-applying the 02/13
+    # rule would delete the real pig 19 (delete_pids [19]).
+    folder = "20260213-14-00-00"
+    frames = [_frame(folder, i) for i in range(20)]
+    assign_ids(frames)
+    assert all(f["include"] for f in frames)
+    raw = [_frame(folder, i) for i in range(22)]          # uncorrected: 19 dup, 20 real, 21 dup
+    assign_ids(raw)
+    assert {f["pig_id"] for f in raw if f["include"]} == set(range(20))
+
+
+def test_duplicates_resolved_among_usable_captures():
+    from id_corrections import dedupe
+    folder = "20260301-04-00-00"
+    first = _frame(folder, 5, "20260301-04-00-10")
+    second = _frame(folder, 5, "20260301-04-00-40")
+    assign_ids([first, second], dedupe_captures=False)
+    usable = [second]                                     # first capture was corrupt
+    dedupe(usable)
+    assert second["include"] and second["id_status"] == "ok"
+
+
+def test_multimodal_augmentation_keeps_blocks_aligned():
+    import torch
+    sys.path.insert(0, os.path.join(ROOT, "posture"))
+    from train import ArrayDataset
+    img = (np.random.default_rng(0).random((1, 64, 64, 3)) * 255).astype(np.uint8)
+    six = np.concatenate([img, img], axis=3)               # identical RGB and IR blocks
+    ds = ArrayDataset(six, np.array([0]), augment=True)
+    ds.color = lambda t: t                                 # isolate the geometric part
+    for _ in range(10):
+        x, _ = ds[0]
+        assert torch.equal(x[:3], x[3:]), "flip/affine must be shared across modality blocks"
 
 
 if __name__ == "__main__":

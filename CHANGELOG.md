@@ -46,12 +46,28 @@ Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC
 - **`posture/eval_ground_truth.py`.** Scores predictions against Lucas's time-stamped `sow position.xlsx` (Feb 6–10, all 20 pigs every ~10 min). This is the first independent test set: different days and a different labeller from training. It also compares nightly transition counts: truth vs predicted vs smoothed.
 - **`posture_matrix.csv` output.** Rows are timestamp folders, columns are pig0…pig19 — the format Fengkai asked for on Mar 15.
 - **`--data-root`.** Label CSVs (Mac absolute paths) now resolve on any machine by file name.
-- **Tests.** `tests/test_posture_pipeline.py` has 9 checks on synthetic OAK-D folders with no lab data needed. It covers:
+- **Tests.** `tests/test_posture_pipeline.py` has 13 checks on synthetic OAK-D folders with no lab data needed. It covers:
   - the ID policy
   - smoothing
   - the end-to-end CLI
   - the notebook staying in sync with the repo
   - transition counting on legacy CSVs
+
+### Hardening after an independent review of v1.1
+
+- **Correction rules run only once per window.** A rule is applied only if its time window still contains IDs that need fixing. CSVs and folders that v1.0's fix scripts already patched keep their real pig 19.
+- **Duplicates are resolved among usable captures.** Duplicate captures are only compared once a frame has a prediction. A corrupt or empty first capture no longer hides a good second one, so the CLI and Colab now agree.
+- **Smoothed columns only exist after smoothing.** They are written only when `--smooth` is used. `count_posture_changes --use-smoothed` stops if the column is empty, and `eval_ground_truth` skips the smoothed line.
+- **Crop setting is honoured.** Inference respects each checkpoint's `crop` flag, both in the CLI and in Colab. The pig detector always gets the stall crop.
+- **Fused-modality augmentation is aligned.** Flip and shift/rotate are applied once to all channels, so RGB and IR blocks stay aligned. Colour jitter is still applied per block.
+- **`eval.py --class-set posture3` now works.** It switches to `labels_posture3.csv`, so the documented command runs.
+- **Safe cross-validation fold count.** `--cv` caps the number of folds at the number of pigs and refuses empty splits.
+- **Empty-result guard.** When every frame is set aside, the CLI and notebook print a clear message instead of crashing.
+- **Smaller changes:**
+  - `train.py` now defaults to `--class-set posture3`.
+  - `infer_batch.py` has a `--no-crop` option.
+  - Sheet names like `02_06` now parse.
+- **Tests.** There are now 13 checks.
 
 ### Not changed / still open
 

@@ -39,7 +39,7 @@ from config import CROP_TOF, MODEL_DIR, OUTPUT_DIR, POSTURE3_CLASSES, IMG_SIZE
 from models import SingleModalModel
 from preprocess import (ckpt_preprocessing, crop_stall, load_model_input, normalize_batch,
                         pick_device, read_image, resize_rgb_uint8)
-from id_corrections import assign_ids, folder_quality
+from id_corrections import assign_ids, dedupe, folder_quality
 from temporal import smooth_results
 
 # ── Constants ─────────────────────────────────────────────────────────────
@@ -169,14 +169,18 @@ ST_OK, ST_EMPTY_DEPTH, ST_CORRUPT = 0, 1, 2
 
 
 class FrameDataset(Dataset):
-    """Loads one capture: depth prefilter + cropped IR as uint8 CHW.
+    """Loads one capture: depth prefilter + IR as uint8 CHW.
 
-    Lives at module level so DataLoader workers can pickle it on Windows.
+    Returns the stall-cropped image (what the pig detector was trained on) and
+    the image for the posture model (cropped unless its checkpoint says
+    crop=False). Lives at module level so DataLoader workers can pickle it on
+    Windows.
     """
 
-    def __init__(self, frames, size=IMG_SIZE):
+    def __init__(self, frames, size=IMG_SIZE, crop_for_model=True):
         self.frames = frames
         self.size = size
+        self.crop_for_model = crop_for_model
 
     def __len__(self):
         return len(self.frames)
@@ -186,17 +190,22 @@ class FrameDataset(Dataset):
         empty = torch.zeros((3, self.size, self.size), dtype=torch.uint8)
         present, median_d = check_pig_present(frame.get("depth_raw", ""))
         if not present:
-            return idx, empty, ST_EMPTY_DEPTH, median_d
+            return idx, empty, empty, ST_EMPTY_DEPTH, median_d
         path = get_image_path(frame)
         img = read_image(path)
         if img is None:
-            return idx, empty, ST_CORRUPT, median_d
-        img = resize_rgb_uint8(crop_stall(img, path), self.size)
-        return idx, torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1))), ST_OK, median_d
+            return idx, empty, empty, ST_CORRUPT, median_d
+
+        def to_t(a):
+            return torch.from_numpy(np.ascontiguousarray(a.transpose(2, 0, 1)))
+
+        cropped = to_t(resize_rgb_uint8(crop_stall(img, path), self.size))
+        model_img = cropped if self.crop_for_model else to_t(resize_rgb_uint8(img, self.size))
+        return idx, cropped, model_img, ST_OK, median_d
 
 
 def run_predictions(data_dir, device, model, detector=None, batch_size=64, workers=4,
-                    posture_normalize=None, frames=None):
+                    posture_normalize=None, frames=None, posture_crop=True):
     """Batched inference. Returns (results, stats).
 
     Same decisions as v1.0 (depth prefilter -> CNN detector p>=0.5 -> posture),
@@ -215,7 +224,7 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
     else:
         print("  (pig presence: depth prefilter + CNN detector)")
 
-    loader = DataLoader(FrameDataset(frames), batch_size=batch_size, shuffle=False,
+    loader = DataLoader(FrameDataset(frames, crop_for_model=posture_crop), batch_size=batch_size, shuffle=False,
                         num_workers=workers, persistent_workers=False)
     class_ids = sorted(POSTURE3_CLASSES)
     results = []
@@ -224,7 +233,7 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
     t0 = time.time()
 
     with torch.inference_mode():
-        for idxs, imgs, status, medians in loader:
+        for idxs, imgs, model_imgs, status, medians in loader:
             done += len(idxs)
             stats["empty_depth"] += int((status == ST_EMPTY_DEPTH).sum())
             stats["corrupt"] += int((status == ST_CORRUPT).sum())
@@ -232,6 +241,7 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
             if len(keep) == 0:
                 continue
             x = imgs[keep].to(device).float().div_(255.0)
+            xm = x if posture_crop else model_imgs[keep].to(device).float().div_(255.0)
 
             present_prob = torch.ones(len(keep))
             if detector is not None:
@@ -239,11 +249,11 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
                 present_prob = det
                 ok = det >= 0.5
                 stats["empty_detector"] += int((~ok).sum())
-                keep, x, present_prob = keep[ok], x[ok.to(x.device)], det[ok]
+                keep, xm, present_prob = keep[ok], xm[ok.to(xm.device)], det[ok]
                 if len(keep) == 0:
                     continue
 
-            probs = torch.softmax(model(normalize_batch(x, posture_normalize)), dim=1).cpu().numpy()
+            probs = torch.softmax(model(normalize_batch(xm, posture_normalize)), dim=1).cpu().numpy()
             for j, k in enumerate(keep.tolist()):
                 frame = frames[int(idxs[k])]
                 pred = int(np.argmax(probs[j]))
@@ -339,7 +349,8 @@ PRED_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp",
                "median_depth", "image_path",
                "pig_id_raw", "id_status", "pig_present_prob",
                "prob_standing", "prob_sitting", "prob_lying",
-               "posture_changed", "smoothed_prediction_name"]
+               "posture_changed"]
+SMOOTH_FIELDS = ["smoothed_prediction_name", "posture_changed_smoothed"]
 
 
 # ── Step 3: Generate outputs ──────────────────────────────────────────────
@@ -880,6 +891,9 @@ def generate_timestamp_summary(results, out_path):
 def print_summary(results):
     counts = Counter(r["prediction_name"] for r in results)
     total = len(results)
+    if total == 0:
+        print("\n  No frames left after filtering (see predictions_excluded.csv / data_quality.csv)")
+        return
     print(f"\n{'='*50}")
     print(f"  Total predicted: {total}")
     for name in ["standing", "sitting", "lying"]:
@@ -902,7 +916,8 @@ def load_posture_model(model_path, device):
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    normalize, _ = ckpt_preprocessing(ckpt)
+    normalize, crop = ckpt_preprocessing(ckpt)
+    model.posture_crop = crop
     return model, ckpt, normalize
 
 
@@ -964,20 +979,34 @@ def main():
         print("Pig detector: not used — depth prefilter only")
     print()
 
-    # Step 1: scan + ID policy on every capture (so the quality report sees everything)
+    # Step 1: scan + ID policy on every capture
     frames = scan_folder(data_dir)
     if not frames:
         print("No frames found.")
         return
-    assign_ids(frames, policy=args.id_policy)
-    quality = folder_quality(frames)
+    csv_path = os.path.join(out_dir, "predictions.csv")
+    excluded_path = os.path.join(out_dir, "predictions_excluded.csv")
+    quality_path = os.path.join(out_dir, "data_quality.csv")
+    coverage_path = os.path.join(out_dir, "coverage_by_pig_day.csv")
+    matrix_path = os.path.join(out_dir, "posture_matrix.csv")
+    heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
+    heatmap_raw_path = os.path.join(out_dir, "posture_heatmap_raw_ids.png")
+    ts_summary_path = os.path.join(out_dir, "timestamp_summary.csv")
+
+    # Quality report describes the raw captures (incl. double captures), written first
+    quality = folder_quality(assign_ids([dict(f) for f in frames], policy=args.id_policy))
+    save_rows(quality, quality_path, list(quality[0].keys()))
+    # For the outputs, duplicates are resolved later among captures that produced a
+    # prediction, so a corrupt/empty first capture does not hide a usable second one.
+    assign_ids(frames, policy=args.id_policy, dedupe_captures=False, verbose=True)
     status_by_key = {(f["timestamp_folder"], f["pig_id_raw"], f["pig_timestamp"]): f for f in frames}
 
     # Step 2: predict (cropping happens in memory, no disk writes)
     raw_frames = [dict(f, pig_id=f["pig_id_raw"]) for f in frames]
     results, stats = run_predictions(data_dir, device, model, detector=detector,
                                      batch_size=args.batch_size, workers=args.workers,
-                                     posture_normalize=posture_norm, frames=raw_frames)
+                                     posture_normalize=posture_norm, frames=raw_frames,
+                                     posture_crop=getattr(model, "posture_crop", True))
     if not results:
         print("No predictions generated.")
         return
@@ -988,6 +1017,7 @@ def main():
         r["id_status"] = f["id_status"]
         r["include"] = f["include"]
         r["pig_id"] = f["pig_id"]
+    dedupe(results)
 
     kept = [r for r in results if r["include"]]
     excluded = [r for r in results if not r["include"]]
@@ -998,22 +1028,16 @@ def main():
                           out_key="posture_changed_smoothed", max_gap_minutes=args.max_gap)
 
     # Step 3: save outputs
-    csv_path = os.path.join(out_dir, "predictions.csv")
-    excluded_path = os.path.join(out_dir, "predictions_excluded.csv")
-    quality_path = os.path.join(out_dir, "data_quality.csv")
-    coverage_path = os.path.join(out_dir, "coverage_by_pig_day.csv")
-    heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
-    heatmap_raw_path = os.path.join(out_dir, "posture_heatmap_raw_ids.png")
-    ts_summary_path = os.path.join(out_dir, "timestamp_summary.csv")
-
-    fields = PRED_FIELDS + (["posture_changed_smoothed"] if args.smooth > 1 else [])
+    fields = PRED_FIELDS + (SMOOTH_FIELDS if args.smooth > 1 else [])
     save_rows(kept, csv_path, fields)
     save_rows(excluded, excluded_path, fields)
-    save_rows(quality, quality_path, list(quality[0].keys()))
     save_coverage(kept, coverage_path)
-    matrix_path = os.path.join(out_dir, "posture_matrix.csv")
     save_posture_matrix(kept, matrix_path,
                         key="smoothed_prediction_name" if (args.use_smoothed and args.smooth > 1) else "prediction_name")
+    if not kept:
+        print_summary(kept)
+        print(f"  Every prediction was set aside by the ID policy — see {excluded_path} and {quality_path}")
+        return
     print(f"\n[2/2] Generating outputs...")
 
     # Raw-ID heatmap shows every capture the camera produced (overflow visible)
@@ -1031,10 +1055,10 @@ def main():
     generate_excel_report(outputs, excel_path)
     generate_timestamp_summary(outputs, ts_summary_path)
 
+    status_counts = Counter(r["id_status"] for r in results)
     n_review = sum(q["needs_review"] for q in quality)
-    status_counts = Counter(f["id_status"] for f in frames)
     print_summary(outputs)
-    print(f"  ID policy: {args.id_policy} | capture status: {dict(status_counts)}")
+    print(f"  ID policy: {args.id_policy} | predicted-frame status: {dict(status_counts)}")
     print(f"  Folders needing review: {n_review}/{len(quality)} (see data_quality.csv)")
     print(f"\n  CSV:              {csv_path}")
     print(f"  Excluded rows:    {excluded_path}")

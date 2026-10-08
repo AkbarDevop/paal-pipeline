@@ -109,7 +109,44 @@ def apply_corrections(folder, pid, rules=CORRECTIONS):
     return pid, None
 
 
-def assign_ids(frames, policy="strict", num_stalls=NUM_STALLS, rules=CORRECTIONS):
+def active_rules(frames, rules=CORRECTIONS):
+    """Rules whose window still contains uncorrected IDs.
+
+    A rename rule like pig20 -> pig19 only makes sense if the window still has
+    camera IDs >= 20. Data that v1.0's fix_pig_ids.py / fix_predictions_csv.py
+    already corrected has none, and re-applying the rule would delete the real
+    pig 19 (its delete_pids list). Such rules are skipped.
+    """
+    active, skipped = [], []
+    for rule in rules:
+        threshold = min(list(rule["rename"].keys()) + [rule["delete_gte"]])
+        in_window = [f for f in frames
+                     if rule["start"] <= f["timestamp_folder"] <= rule["end"]]
+        if any(int(f.get("pig_id_raw", f["pig_id"])) >= threshold for f in in_window):
+            active.append(rule)
+        elif in_window:
+            skipped.append(rule["name"])
+    return active, skipped
+
+
+def dedupe(frames):
+    """One capture per stall per timestamp folder among included frames: keep the earliest."""
+    groups = defaultdict(list)
+    for f in frames:
+        if f.get("include"):
+            groups[(f["timestamp_folder"], f["pig_id"])].append(f)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda g: (g.get("pig_timestamp", ""), g["pig_id_raw"]))
+        for dup in group[1:]:
+            dup["id_status"] = "duplicate"
+            dup["include"] = False
+    return frames
+
+
+def assign_ids(frames, policy="strict", num_stalls=NUM_STALLS, rules=CORRECTIONS, dedupe_captures=True,
+               verbose=False):
     """Annotate frames in place with pig_id_raw, pig_id, id_status and include.
 
     Each frame needs timestamp_folder, pig_id (camera id) and pig_timestamp.
@@ -122,10 +159,18 @@ def assign_ids(frames, policy="strict", num_stalls=NUM_STALLS, rules=CORRECTIONS
       modulo      legacy behaviour (policy="modulo"): id mapped with % num_stalls
       duplicate   a second capture of the same stall in the same folder
 
+    Rules whose window has no IDs left to fix (data already corrected by v1.0
+    scripts) are skipped, so corrections are never applied twice.
+    Set dedupe_captures=False to resolve duplicates later with dedupe(), e.g.
+    only among captures that actually produced a prediction.
     Only frames with include=True should feed per-pig outputs.
     """
     if policy not in ("strict", "modulo"):
         raise ValueError("policy must be 'strict' or 'modulo'")
+
+    rules, skipped = active_rules(frames, rules)
+    if skipped and verbose:
+        print(f"  ID rules skipped (window already corrected): {skipped}")
 
     for f in frames:
         raw = int(f.get("pig_id_raw", f["pig_id"]))
@@ -143,18 +188,8 @@ def assign_ids(frames, policy="strict", num_stalls=NUM_STALLS, rules=CORRECTIONS
                 continue
         f.update(pig_id=new_pid, id_status=status, include=True, id_rule=rule)
 
-    # One capture per stall per timestamp folder: keep the earliest.
-    groups = defaultdict(list)
-    for f in frames:
-        if f["include"]:
-            groups[(f["timestamp_folder"], f["pig_id"])].append(f)
-    for group in groups.values():
-        if len(group) < 2:
-            continue
-        group.sort(key=lambda g: (g.get("pig_timestamp", ""), g["pig_id_raw"]))
-        for dup in group[1:]:
-            dup["id_status"] = "duplicate"
-            dup["include"] = False
+    if dedupe_captures:
+        dedupe(frames)
     return frames
 
 

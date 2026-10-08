@@ -20,7 +20,8 @@ except ImportError:
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from config import BATCH_SIZE, BINARY_CLASSES, POSTURE3_CLASSES, LABELS_CSV, MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS
+from config import (BATCH_SIZE, BINARY_CLASSES, POSTURE3_CLASSES, LABELS_CSV, LABELS_POSTURE3_CSV,
+                    MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS)
 from data_loader import MODALITY_CHANNELS, SowPostureDataset
 from models import BACKBONES, SingleModalModel
 from preprocess import ckpt_preprocessing, pick_device
@@ -196,6 +197,10 @@ def main(args):
     print(f"Device: {device}")
     print(f"Test pigs: {TEST_PIG_IDS}\n")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    if args.class_set == "posture3":
+        args.num_classes = 3
+        if args.labels_csv == LABELS_CSV:
+            args.labels_csv = LABELS_POSTURE3_CSV
     class_map = {"binary": BINARY_CLASSES, "posture3": POSTURE3_CLASSES}
     base_class_names = class_map[args.class_set]
     allowed_labels = parse_allowed_labels(args.allowed_labels)

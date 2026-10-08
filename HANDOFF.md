@@ -257,7 +257,7 @@ In `papers/`:
 
 ```bash
 pip install -r requirements.txt
-python tests/test_posture_pipeline.py   # 10 quick checks on synthetic data, ~20 s, no lab data needed
+python tests/test_posture_pipeline.py   # 13 quick checks on synthetic data, ~20 s, no lab data needed
 ```
 
 Key deps: `torch`, `torchvision`, `opencv-python`, `numpy`, `pandas`, `openpyxl`, `matplotlib`, `tqdm`, `open3d` (vulva only), `python-pptx` (slides only).

@@ -158,8 +158,9 @@ def load_predictions(csv_path, posture_column="prediction_name", id_policy="stri
             if f["include"]:
                 f["_row"]["pig_id"] = f["pig_id"]
                 raw_rows.append(f["_row"])
-    if raw_rows and posture_column not in raw_rows[0]:
-        raise SystemExit(f"Column '{posture_column}' not in {csv_path} "
+    if raw_rows and (posture_column not in raw_rows[0]
+                     or not any((r.get(posture_column) or "").strip() for r in raw_rows)):
+        raise SystemExit(f"Column '{posture_column}' is missing or empty in {csv_path} "
                          f"(run run_inference.py with --smooth 3 to get smoothed_prediction_name)")
 
     rows = []

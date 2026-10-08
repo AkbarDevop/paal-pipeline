@@ -46,14 +46,15 @@ def parse_codes(spec):
 
 
 def sheet_date(name, year, explicit=None):
-    """'26' -> Feb 6, '210' -> Feb 10, '2-6' / '02_06' also accepted."""
+    """'26' -> Feb 6, '210' -> Feb 10; '2-6', '02_06', '2.10' also accepted."""
     if explicit:
         return datetime.strptime(explicit, "%Y-%m-%d").date()
-    digits = re.sub(r"\D", "", name)
-    if not digits:
-        return None
-    month, day = int(digits[0]), int(digits[1:]) if len(digits) > 1 else None
-    if day is None:
+    parts = [p for p in re.split(r"\D+", name) if p]
+    if len(parts) >= 2:
+        month, day = int(parts[0]), int(parts[1])
+    elif len(parts) == 1 and len(parts[0]) >= 2:
+        month, day = int(parts[0][0]), int(parts[0][1:])
+    else:
         return None
     try:
         return datetime(year, month, day).date()
@@ -214,7 +215,8 @@ def main():
 
     gt = read_ground_truth(args.gt, parse_codes(args.codes), args.year, args.stall_offset, args.sheets)
     preds = read_predictions(args.pred)
-    has_smooth = any("smoothed_prediction_name" in r for seq in preds.values() for _, r in seq[:1])
+    has_smooth = any((r.get("smoothed_prediction_name") or "").strip()
+                     for seq in preds.values() for _, r in seq)
 
     rows, raw_pairs, sm_pairs = [], [], []
     per_pig = defaultdict(lambda: [0, 0])
