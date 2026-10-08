@@ -217,6 +217,31 @@ def test_transition_counting_on_legacy_csv_drops_overflow():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_ground_truth_sheet_parsing():
+    import openpyxl
+    from eval_ground_truth import read_ground_truth, sheet_date
+    assert str(sheet_date("26", 2026)) == "2026-02-06"
+    assert str(sheet_date("210", 2026)) == "2026-02-10"
+    tmp = tempfile.mkdtemp(prefix="paal_gt_")
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "26"
+        ws.append(["Sow position Feb 6"])
+        ws.append(["Time"] + list(range(20)))
+        ws.append(["08:00"] + [0] * 19 + [2])
+        ws.append(["08:10"] + [1] * 20)
+        path = os.path.join(tmp, "gt.xlsx")
+        wb.save(path)
+        gt = read_ground_truth(path, {"0": "lying", "1": "sitting", "2": "standing"}, 2026)
+        assert len(gt) == 40
+        first = [g for g in gt if g["time"].hour == 8 and g["time"].minute == 0]
+        assert {g["label"] for g in first if g["pig_id"] == 19} == {"standing"}
+        assert {g["label"] for g in first if g["pig_id"] == 0} == {"lying"}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

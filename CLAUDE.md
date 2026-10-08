@@ -46,9 +46,10 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 - `posture/id_corrections.py` — Camera ID rules + ID policy + data-quality report (single source of truth)
 - `posture/preprocess.py` — Shared crop/resize/normalize for training, inference and eval
 - `posture/temporal.py` — Per-pig temporal smoothing (optional `--smooth 3`)
+- `posture/eval_ground_truth.py` — Score predictions vs Lucas's `sow position.xlsx` (Feb 6–10, independent test)
 - `posture/benchmark.py` — Before/after benchmark (shipped model, v1.0 vs v1.1 recipe, grouped CV, smoothing check)
 - `posture/fix_pig_ids.py` / `posture/fix_predictions_csv.py` — Legacy: file renames (dry-run default) / pre-v1.1 CSV patch
-- `tests/test_posture_pipeline.py` — 9 synthetic-data checks (`python tests/test_posture_pipeline.py`)
+- `tests/test_posture_pipeline.py` — 10 synthetic-data checks (`python tests/test_posture_pipeline.py`)
 - `posture/models.py` — MobileNetV2/Xception/DenseNet121 architectures
 - `posture/data_loader.py` — PyTorch Dataset with pig-ID splits
 - `config.py` (repo root) — All paths, crop boxes, class definitions; shared with vulva/

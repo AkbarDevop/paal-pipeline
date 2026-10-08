@@ -320,6 +320,20 @@ def save_coverage(results, out_path, num_stalls=20):
             w.writerow([pid] + [counts[pid].get(d, 0) for d in days])
 
 
+def save_posture_matrix(results, out_path, num_stalls=20, key="prediction_name"):
+    """Wide table Fengkai asked for: one row per timestamp folder, columns pig0..pig19."""
+    grid = defaultdict(dict)
+    for r in results:
+        grid[r["timestamp_folder"]][r["pig_id"]] = r[key]
+    with open(out_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["timestamp_folder", "datetime"] + [f"pig{i}" for i in range(num_stalls)])
+        for folder in sorted(grid):
+            t = parse_timestamp(folder)
+            w.writerow([folder, t.strftime("%Y-%m-%d %H:%M:%S") if t else ""]
+                       + [grid[folder].get(i, "") for i in range(num_stalls)])
+
+
 PRED_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp",
                "prediction", "prediction_name", "confidence",
                "median_depth", "image_path",
@@ -997,6 +1011,9 @@ def main():
     save_rows(excluded, excluded_path, fields)
     save_rows(quality, quality_path, list(quality[0].keys()))
     save_coverage(kept, coverage_path)
+    matrix_path = os.path.join(out_dir, "posture_matrix.csv")
+    save_posture_matrix(kept, matrix_path,
+                        key="smoothed_prediction_name" if (args.use_smoothed and args.smooth > 1) else "prediction_name")
     print(f"\n[2/2] Generating outputs...")
 
     # Raw-ID heatmap shows every capture the camera produced (overflow visible)
@@ -1023,6 +1040,7 @@ def main():
     print(f"  Excluded rows:    {excluded_path}")
     print(f"  Data quality:     {quality_path}")
     print(f"  Coverage:         {coverage_path}")
+    print(f"  Posture matrix:   {matrix_path}  (rows = folders, columns = pig0..pig19)")
     print(f"  Heatmap (all):    {heatmap_path}")
     print(f"  Heatmap (raw IDs):{heatmap_raw_path}")
     print(f"  Per-pig outputs:  {os.path.join(out_dir, 'per_pig')}/")

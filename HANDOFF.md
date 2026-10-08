@@ -107,6 +107,18 @@ python posture/regenerate_heatmap.py
 
 Reads `outputs/predictions.csv` and rebuilds heatmaps. Use this after editing pig IDs or tweaking colors.
 
+### Scoring against Lucas's time-stamped posture ground truth (independent test)
+
+Lucas's `sow position.xlsx` (Teams → Ground Truth) labels all 20 pigs every ~10 min on Feb 6–10 (codes 0 = lying, 1 = sitting, 2 = standing). The matching OAK frames are in `OAK_0206_0211` on the room-127 PC (Dr. Zhou found them Apr 19), so this is a test on days and labels the model never saw:
+
+```bash
+python posture/run_inference.py "<path>\OAK_0206_0211" --output-dir outputs/gt_feb06 --smooth 3
+python posture/eval_ground_truth.py --gt "sow position.xlsx" --pred outputs/gt_feb06/predictions.csv
+# if the sheet layout is different: add --inspect to see the first rows of every sheet
+```
+
+`run_inference.py` also writes `posture_matrix.csv` (rows = timestamp folders, columns = pig0…pig19), the format Fengkai asked for to test the model himself.
+
 ### Comparing posture against Lucas's estrus ground truth
 
 ```bash
@@ -245,7 +257,7 @@ In `papers/`:
 
 ```bash
 pip install -r requirements.txt
-python tests/test_posture_pipeline.py   # 9 quick checks on synthetic data, ~20 s, no lab data needed
+python tests/test_posture_pipeline.py   # 10 quick checks on synthetic data, ~20 s, no lab data needed
 ```
 
 Key deps: `torch`, `torchvision`, `opencv-python`, `numpy`, `pandas`, `openpyxl`, `matplotlib`, `tqdm`, `open3d` (vulva only), `python-pptx` (slides only).

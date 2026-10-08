@@ -43,6 +43,8 @@ Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC
   - the shipped model on its test pigs
   - the v1.0 recipe against the v1.1 recipe under the same folds
   - transitions in the labels against predicted transitions, raw and smoothed
+- **`posture/eval_ground_truth.py`.** Scores predictions against Lucas's time-stamped `sow position.xlsx` (Feb 6–10, all 20 pigs every ~10 min). This is the first independent test set: different days and a different labeller from training. It also compares nightly transition counts: truth vs predicted vs smoothed.
+- **`posture_matrix.csv` output.** Rows are timestamp folders, columns are pig0…pig19 — the format Fengkai asked for on Mar 15.
 - **`--data-root`.** Label CSVs (Mac absolute paths) now resolve on any machine by file name.
 - **Tests.** `tests/test_posture_pipeline.py` has 9 checks on synthetic OAK-D folders with no lab data needed. It covers:
   - the ID policy
