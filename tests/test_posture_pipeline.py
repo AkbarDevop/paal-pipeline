@@ -115,6 +115,21 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
+def test_scan_folder_date_range():
+    from run_inference import scan_folder
+    tmp = tempfile.mkdtemp(prefix="paal_test_")
+    try:
+        data = make_synthetic_dataset(os.path.join(tmp, "data"))   # 20:00 .. 21:50 on Mar 1
+        folders = lambda **kw: sorted({f["timestamp_folder"] for f in scan_folder(data, **kw)})
+        assert len(folders()) == 12
+        assert folders(start="20260301-20-30-00", end="20260301-21-00-00") == [
+            "20260301-20-30-00", "20260301-20-40-00", "20260301-20-50-00", "20260301-21-00-00"]
+        assert len(folders(end="20260301")) == 12, "a date-only end includes that whole day"
+        assert folders(start="20260302") == []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_end_to_end_cli(tmp=None):
     model = os.path.join(ROOT, "models", "posture3_ir_best.pth")
     if not os.path.exists(model):

@@ -46,7 +46,7 @@ Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC
 - **`posture/eval_ground_truth.py`.** Scores predictions against Lucas's time-stamped `sow position.xlsx` (Feb 6–10, all 20 pigs every ~10 min). This is the first independent test set: different days and a different labeller from training. It also compares nightly transition counts: truth vs predicted vs smoothed.
 - **`posture_matrix.csv` output.** Rows are timestamp folders, columns are pig0…pig19 — the format Fengkai asked for on Mar 15.
 - **`--data-root`.** Label CSVs (Mac absolute paths) now resolve on any machine by file name.
-- **Tests.** `tests/test_posture_pipeline.py` has 13 checks on synthetic OAK-D folders with no lab data needed. It covers:
+- **Tests.** `tests/test_posture_pipeline.py` has 14 checks on synthetic OAK-D folders with no lab data needed. It covers:
   - the ID policy
   - smoothing
   - the end-to-end CLI
@@ -67,7 +67,8 @@ Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC
   - `train.py` now defaults to `--class-set posture3`.
   - `infer_batch.py` has a `--no-crop` option.
   - Sheet names like `02_06` now parse.
-- **Tests.** There are now 13 checks.
+- **Tests.** There are now 14 checks.
+- **`--start` / `--end` date range in `run_inference.py`.** Ported from the lab PC's local edit (used for the Mar 17–27 run). Bounds are inclusive timestamp-folder names; a date alone, like `--end 20260327`, includes that whole day.
 
 ### Not changed / still open
 

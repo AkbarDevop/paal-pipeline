@@ -98,11 +98,17 @@ def check_pig_present(depth_raw_path):
     return median < DEPTH_THRESHOLD, median
 
 
-def scan_folder(data_dir):
+def scan_folder(data_dir, start=None, end=None):
+    """start/end: optional inclusive bounds on the timestamp folder name
+    (YYYYMMDD-HH-MM-SS sorts as text, so a date prefix like 20260317 works too)."""
     folders = sorted(
         d for d in os.listdir(data_dir)
         if os.path.isdir(os.path.join(data_dir, d)) and FOLDER_RE.match(d)
     )
+    if start:
+        folders = [d for d in folders if d >= start]
+    if end:
+        folders = [d for d in folders if d[:len(end)] <= end]
     if not folders:
         return []
 
@@ -948,6 +954,10 @@ def main():
                         help="Max minutes between frames to treat them as consecutive")
     parser.add_argument("--no-detector", action="store_true",
                         help="Skip the CNN pig-presence detector (depth prefilter only)")
+    parser.add_argument("--start", default=None,
+                        help="Earliest timestamp folder to include, e.g. 20260317-00-06-44 or 20260317")
+    parser.add_argument("--end", default=None,
+                        help="Latest timestamp folder to include, e.g. 20260327-08-13-46 or 20260327 (whole day)")
     args = parser.parse_args()
 
     data_dir = args.data_dir
@@ -981,7 +991,9 @@ def main():
     print()
 
     # Step 1: scan + ID policy on every capture
-    frames = scan_folder(data_dir)
+    if args.start or args.end:
+        print(f"Date filter: start={args.start or '-'} end={args.end or '-'}")
+    frames = scan_folder(data_dir, start=args.start, end=args.end)
     if not frames:
         print("No frames found.")
         return
