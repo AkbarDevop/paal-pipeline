@@ -19,6 +19,14 @@ Matching: each ground-truth cell (time, pig) is paired with the prediction
 for the same pig whose timestamp is closest, within --tolerance minutes.
 Reports accuracy / macro-F1 / confusion for raw and smoothed predictions and
 compares nightly transition counts (ground truth vs predicted).
+
+Presence check: Lucas recorded a sow in the stall for every ground-truth cell,
+so a cell with no prediction is a miss. Using skipped_frames.csv and
+predictions_excluded.csv from the same run, each miss is explained as
+skipped by the depth gate, rejected by the presence CNN, unreadable, set aside
+by the ID policy, or no capture at all, and broken down by the recorded
+posture (a depth gate that drops lying sows shows up here). Misses are written
+to ground_truth_misses.csv for visual review (posture/review_presence.py).
 """
 
 import argparse
@@ -154,6 +162,47 @@ def read_predictions(path):
     return by_pig
 
 
+def read_frames(path, include_only=True):
+    """skipped_frames.csv / predictions_excluded.csv -> {pig_id: [(time, row), ...]}"""
+    by_pig = defaultdict(list)
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            if include_only and str(r.get("include", "True")) not in ("True", "1", "true"):
+                continue
+            try:
+                t = datetime.strptime(r["pig_timestamp"], "%Y%m%d-%H-%M-%S")
+                by_pig[int(r["pig_id"])].append((t, r))
+            except (ValueError, KeyError):
+                continue
+    for v in by_pig.values():
+        v.sort(key=lambda x: x[0])
+    return by_pig
+
+
+MISS_REASONS = ["depth", "detector", "corrupt", "id_policy", "no_frame"]
+
+
+def explain_misses(misses, skipped, excluded, tol):
+    """Attach the most likely reason to each ground-truth cell that got no prediction."""
+    out = []
+    for g in misses:
+        row = {"time": g["time"].strftime("%Y-%m-%d %H:%M"), "pig_id": g["pig_id"], "ground_truth": g["label"],
+               "reason": "no_frame", "frame": "", "median_depth": "", "pig_present_prob": "", "image_path": ""}
+        s = nearest(skipped.get(g["pig_id"], []), g["time"], tol) if skipped is not None else None
+        if s is not None:
+            row.update(reason=s["reason"], frame=s["pig_timestamp"], median_depth=s.get("median_depth", ""),
+                       pig_present_prob=s.get("pig_present_prob", ""), image_path=s.get("image_path", ""))
+        elif excluded is not None:
+            e = nearest(excluded.get(g["pig_id"], []), g["time"], tol)
+            if e is not None:
+                row.update(reason="id_policy", frame=e["pig_timestamp"], median_depth=e.get("median_depth", ""),
+                           image_path=e.get("image_path", ""))
+        out.append(row)
+    return out
+
+
 def nearest(seq, t, tol):
     import bisect
     times = [x[0] for x in seq]
@@ -200,6 +249,10 @@ def main():
     ap.add_argument("--sheets", nargs="*", default=None)
     ap.add_argument("--inspect", action="store_true", help="Print the first rows of each sheet and exit")
     ap.add_argument("--out", default=os.path.join(OUTPUT_DIR, "ground_truth_eval.csv"))
+    ap.add_argument("--skipped", default=None,
+                    help="skipped_frames.csv from the same run (default: next to --pred)")
+    ap.add_argument("--excluded", default=None,
+                    help="predictions_excluded.csv from the same run (default: next to --pred)")
     args = ap.parse_args()
 
     if args.inspect:
@@ -221,10 +274,12 @@ def main():
     rows, raw_pairs, sm_pairs = [], [], []
     per_pig = defaultdict(lambda: [0, 0])
     unmatched = 0
+    misses = []
     for g in gt:
         p = nearest(preds.get(g["pig_id"], []), g["time"], args.tolerance)
         if p is None:
             unmatched += 1
+            misses.append(g)
             continue
         raw = p["prediction_name"]
         sm = p.get("smoothed_prediction_name") or raw
@@ -248,6 +303,9 @@ def main():
         print(f"  {tag:<9} accuracy {m['accuracy']*100:.2f}%  macro-F1 {m['macro_f1']*100:.2f}%  "
               f"confusion (rows=true {NAMES}): {m['confusion']}")
     print("  per-pig accuracy: " + ", ".join(f"{p}:{c / n * 100:.0f}%" for p, (c, n) in sorted(per_pig.items())))
+    if per_pig and min(c / n for c, n in per_pig.values()) < 0.6:
+        print("  Note: a pig far below the others usually means a camera-ID / stall shift on those days, "
+              "not a model error — check data_quality.csv for those folders.")
 
     # transitions on the matched GT grid (same instants for truth and prediction)
     by = defaultdict(list)
@@ -266,9 +324,46 @@ def main():
     print(f"  transitions on the GT grid: truth {tr['ground_truth']} | predicted {tr['prediction']}"
           + (f" | smoothed {tr['smoothed']}" if has_smooth else ""))
     print(f"\nRow-level comparison: {args.out}")
-    if per_pig and min(c / n for c, n in per_pig.values()) < 0.6:
-        print("  Note: a pig far below the others usually means a camera-ID / stall shift on those days, "
-              "not a model error — check data_quality.csv for those folders.")
+
+    # ── presence check: every GT cell has a sow, so an unmatched cell is a miss ──
+    pred_dir = os.path.dirname(os.path.abspath(args.pred))
+    skipped = read_frames(args.skipped or os.path.join(pred_dir, "skipped_frames.csv"))
+    excluded = read_frames(args.excluded or os.path.join(pred_dir, "predictions_excluded.csv"), include_only=False)
+    if skipped is None:
+        print("\n  (no skipped_frames.csv next to --pred: re-run run_inference.py v1.1 to explain the misses)")
+    explained = explain_misses(misses, skipped, excluded, args.tolerance)
+    miss_path = os.path.join(os.path.dirname(os.path.abspath(args.out)), "ground_truth_misses.csv")
+    with open(miss_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["time", "pig_id", "ground_truth", "reason", "frame", "median_depth",
+                                          "pig_present_prob", "image_path"])
+        w.writeheader()
+        w.writerows(explained)
+    matched_by = defaultdict(int)
+    for r in rows:
+        matched_by[r["ground_truth"]] += 1
+    miss_by = defaultdict(lambda: defaultdict(int))
+    for r in explained:
+        miss_by[r["ground_truth"]][r["reason"]] += 1
+    print("\nPresence check (every ground-truth cell has a sow in the stall):")
+    print(f"  {'posture':<9} {'cells':>6} {'predicted':>9}  " + "  ".join(f"{m:>9}" for m in MISS_REASONS)
+          + "   kept / captured")
+    for lab in NAMES:
+        n_m = matched_by[lab]
+        n_tot = n_m + sum(miss_by[lab].values())
+        if not n_tot:
+            continue
+        captured = n_m + sum(miss_by[lab][m] for m in ("depth", "detector", "corrupt"))
+        rate = f"{n_m / captured * 100:.1f}%" if captured else "-"
+        print(f"  {lab:<9} {n_tot:>6} {n_m:>9}  " + "  ".join(f"{miss_by[lab][m]:>9}" for m in MISS_REASONS)
+              + f"   {rate}")
+    depth_lying = [float(r["median_depth"]) for r in explained
+                   if r["reason"] == "depth" and r["ground_truth"] == "lying" and r["median_depth"] != ""]
+    if depth_lying:
+        depth_lying.sort()
+        print(f"  lying sows called empty by the depth gate: median depth {depth_lying[len(depth_lying)//2]:.0f} mm "
+              f"(range {depth_lying[0]:.0f}-{depth_lying[-1]:.0f})")
+    print(f"  Misses with the frame each one maps to: {miss_path}")
+    print("  Look at them with: python posture/review_presence.py --misses " + miss_path)
 
 
 if __name__ == "__main__":

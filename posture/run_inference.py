@@ -235,6 +235,14 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
     class_ids = sorted(POSTURE3_CLASSES)
     results = []
     stats = {"scanned": len(frames), "empty_depth": 0, "empty_detector": 0, "corrupt": 0}
+    skipped = []          # one row per frame that never reached the posture model
+
+    def skip_row(i, reason, median, prob=""):
+        frame = frames[int(i)]
+        return {"timestamp_folder": frame["timestamp_folder"], "pig_id": frame["pig_id"],
+                "pig_timestamp": frame["pig_timestamp"], "reason": reason,
+                "median_depth": round(float(median), 1), "pig_present_prob": prob,
+                "image_path": get_image_path(frame)}
     done = 0
     t0 = time.time()
 
@@ -243,6 +251,9 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
             done += len(idxs)
             stats["empty_depth"] += int((status == ST_EMPTY_DEPTH).sum())
             stats["corrupt"] += int((status == ST_CORRUPT).sum())
+            for k in (status != ST_OK).nonzero(as_tuple=True)[0].tolist():
+                skipped.append(skip_row(idxs[k], "depth" if int(status[k]) == ST_EMPTY_DEPTH else "corrupt",
+                                        medians[k]))
             keep = (status == ST_OK).nonzero(as_tuple=True)[0]
             if len(keep) == 0:
                 continue
@@ -255,6 +266,9 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
                 present_prob = det
                 ok = det >= 0.5
                 stats["empty_detector"] += int((~ok).sum())
+                for j in (~ok).nonzero(as_tuple=True)[0].tolist():
+                    k = int(keep[j])
+                    skipped.append(skip_row(idxs[k], "detector", medians[k], round(float(det[j]), 4)))
                 keep, xm, present_prob = keep[ok], xm[ok.to(xm.device)], det[ok]
                 if len(keep) == 0:
                     continue
@@ -288,6 +302,8 @@ def run_predictions(data_dir, device, model, detector=None, batch_size=64, worke
           f"Skipped (CNN detector): {stats['empty_detector']}, "
           f"Skipped (corrupt/missing): {stats['corrupt']} "
           f"[{time.time() - t0:.0f}s]")
+    skipped.sort(key=lambda r: (r["timestamp_folder"], r["pig_id"], r["pig_timestamp"]))
+    stats["skipped"] = skipped
     return results, stats
 
 
@@ -357,6 +373,8 @@ PRED_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp",
                "prob_standing", "prob_sitting", "prob_lying",
                "posture_changed"]
 SMOOTH_FIELDS = ["smoothed_prediction_name", "posture_changed_smoothed"]
+SKIP_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "reason", "median_depth", "pig_present_prob",
+               "pig_id_raw", "id_status", "include", "image_path"]
 
 
 # ── Step 3: Generate outputs ──────────────────────────────────────────────
@@ -1005,6 +1023,7 @@ def main():
     heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
     heatmap_raw_path = os.path.join(out_dir, "posture_heatmap_raw_ids.png")
     ts_summary_path = os.path.join(out_dir, "timestamp_summary.csv")
+    skipped_path = os.path.join(out_dir, "skipped_frames.csv")
 
     # Quality report describes the raw captures (incl. double captures), written first
     quality = folder_quality(assign_ids([dict(f) for f in frames], policy=args.id_policy))
@@ -1020,6 +1039,14 @@ def main():
                                      batch_size=args.batch_size, workers=args.workers,
                                      posture_normalize=posture_norm, frames=raw_frames,
                                      posture_crop=getattr(model, "posture_crop", True))
+    # Every frame that never reached the posture model (empty by depth, rejected by the
+    # detector, unreadable), with corrected IDs, so presence errors can be audited later.
+    skipped = stats.get("skipped", [])
+    for r in skipped:
+        f = status_by_key[(r["timestamp_folder"], r["pig_id"], r["pig_timestamp"])]
+        r.update(pig_id_raw=f["pig_id_raw"], id_status=f["id_status"], include=f["include"], pig_id=f["pig_id"])
+    save_rows(skipped, skipped_path, SKIP_FIELDS)
+    print(f"  Skipped frames listed in {skipped_path} ({Counter(r['reason'] for r in skipped)})")
     if not results:
         print("No predictions generated.")
         return

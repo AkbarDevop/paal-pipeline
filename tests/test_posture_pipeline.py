@@ -153,6 +153,39 @@ def test_end_to_end_cli(tmp=None):
         quality = _read_csv(os.path.join(out, "data_quality.csv"))
         assert sum(int(q["needs_review"]) for q in quality) == 2
         assert all(r["smoothed_prediction_name"] for r in rows)
+
+        # every frame that never reached the posture model is listed with a reason
+        skipped = _read_csv(os.path.join(out, "skipped_frames.csv"))
+        reasons = {(r["pig_id"], r["reason"]) for r in skipped}
+        assert ("18", "depth") in reasons, "empty stall logged as a depth skip"
+        assert ("3", "corrupt") in reasons, "unreadable jpg logged"
+
+        # presence check: a ground-truth sow with no prediction is explained by the skip log
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "31"                                   # Mar 1, like Lucas's sheet names
+        ws.append(["Time"] + list(range(20)))
+        for k in range(12):
+            ws.append([f"{20 + k // 6:02d}:{(k % 6) * 10:02d}"] + [0] * 20)
+        gt_path = os.path.join(tmp, "gt.xlsx")
+        wb.save(gt_path)
+        proc = subprocess.run([sys.executable, os.path.join(ROOT, "posture", "eval_ground_truth.py"),
+                               "--gt", gt_path, "--pred", os.path.join(out, "predictions.csv"),
+                               "--out", os.path.join(out, "gt_eval.csv")], capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+        assert "Presence check" in proc.stdout
+        misses = _read_csv(os.path.join(out, "ground_truth_misses.csv"))
+        by_reason = {(m["pig_id"], m["reason"]) for m in misses}
+        assert ("18", "depth") in by_reason and ("3", "corrupt") in by_reason
+        assert sum(m["pig_id"] == "18" for m in misses) == 12
+
+        proc = subprocess.run([sys.executable, os.path.join(ROOT, "posture", "review_presence.py"),
+                               "--misses", os.path.join(out, "ground_truth_misses.csv"), "--out",
+                               os.path.join(tmp, "review")], capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+        assert os.path.exists(os.path.join(tmp, "review", "sheet_01.jpg"))
+        assert len(_read_csv(os.path.join(tmp, "review", "review.csv"))) == len(misses)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
