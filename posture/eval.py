@@ -23,6 +23,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from config import BATCH_SIZE, BINARY_CLASSES, POSTURE3_CLASSES, LABELS_CSV, MODEL_DIR, OUTPUT_DIR, TEST_PIG_IDS
 from data_loader import MODALITY_CHANNELS, SowPostureDataset
 from models import BACKBONES, SingleModalModel
+from preprocess import ckpt_preprocessing, pick_device
 
 
 def parse_allowed_labels(raw):
@@ -46,10 +47,14 @@ def evaluate_model(modality, device, args, class_names, allowed_labels, model_pa
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
+    normalize, crop = ckpt_preprocessing(ckpt)   # evaluate with the preprocessing the model was trained with
     test_set = SowPostureDataset(
         modality=modality, labels_csv=args.labels_csv, pig_ids=TEST_PIG_IDS,
         allowed_labels=allowed_labels,
         use_cropped=args.use_cropped,
+        crop=crop and not args.no_crop,
+        normalize=normalize,
+        data_roots=args.data_root,
         silent=True,
     )
     if len(test_set) == 0:
@@ -73,9 +78,11 @@ def evaluate_model(modality, device, args, class_names, allowed_labels, model_pa
         labels, preds, labels=label_ids,
         target_names=[class_names[i] for i in label_ids], zero_division=0,
     )
+    from sklearn.metrics import f1_score
     return {
         "modality": modality,
         "accuracy": accuracy_score(labels, preds),
+        "macro_f1": f1_score(labels, preds, labels=label_ids, average="macro", zero_division=0),
         "n_test": len(test_set),
         "best_epoch": ckpt.get("epoch", "?"),
         "test_pigs": TEST_PIG_IDS,
@@ -185,7 +192,7 @@ def plot_comparison(results):
 
 
 def main(args):
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    device = pick_device()
     print(f"Device: {device}")
     print(f"Test pigs: {TEST_PIG_IDS}\n")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -242,7 +249,8 @@ def main(args):
         r["backbone"] = bb
         r["label"] = label
         results.append(r)
-        print(f"Test accuracy: {r['accuracy']:.4f} ({r['n_test']} frames, best epoch {r['best_epoch']})")
+        print(f"Test accuracy: {r['accuracy']:.4f} | macro-F1: {r['macro_f1']:.4f} "
+              f"({r['n_test']} frames, best epoch {r['best_epoch']})")
         print(f"Confusion matrix:\n{r['confusion_matrix']}")
         print(f"\n{r['report_text']}")
         tag = f"{bb}_{m}" if bb != "mobilenet_v2" else m
@@ -263,6 +271,7 @@ def main(args):
         {
             "modality": r["modality"],
             "test_accuracy": r["accuracy"],
+            "test_macro_f1": r["macro_f1"],
             "n_test_frames": r["n_test"],
             "test_pigs": r["test_pigs"],
             "best_epoch": r["best_epoch"],
@@ -286,4 +295,7 @@ if __name__ == "__main__":
     parser.add_argument("--allowed-labels", default=None)
     parser.add_argument("--use-cropped", action="store_true", help="Use cropped images")
     parser.add_argument("--backbone", default=None, choices=BACKBONES, help="Filter by backbone")
+    parser.add_argument("--data-root", action="append", default=None,
+                        help="Folder(s) containing the labeled timestamp folders")
+    parser.add_argument("--no-crop", action="store_true", help="Evaluate on whole frames")
     main(parser.parse_args())

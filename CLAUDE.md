@@ -43,7 +43,12 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 - `posture/generate_master_report.py` — Per-pig + master Excel workbook with daily statistics
 - `posture/regenerate_heatmap.py` — Rebuild heatmap from predictions.csv (~seconds)
 - `posture/audit_data.py` — Scan timestamp folders, report missing/overflow pig IDs
-- `posture/fix_pig_ids.py` / `posture/fix_predictions_csv.py` — Camera magnet/overflow corrections
+- `posture/id_corrections.py` — Camera ID rules + ID policy + data-quality report (single source of truth)
+- `posture/preprocess.py` — Shared crop/resize/normalize for training, inference and eval
+- `posture/temporal.py` — Per-pig temporal smoothing (optional `--smooth 3`)
+- `posture/benchmark.py` — Before/after benchmark (shipped model, v1.0 vs v1.1 recipe, grouped CV, smoothing check)
+- `posture/fix_pig_ids.py` / `posture/fix_predictions_csv.py` — Legacy: file renames (dry-run default) / pre-v1.1 CSV patch
+- `tests/test_posture_pipeline.py` — 9 synthetic-data checks (`python tests/test_posture_pipeline.py`)
 - `posture/models.py` — MobileNetV2/Xception/DenseNet121 architectures
 - `posture/data_loader.py` — PyTorch Dataset with pig-ID splits
 - `config.py` (repo root) — All paths, crop boxes, class definitions; shared with vulva/
@@ -71,7 +76,8 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 - **Task A Model**: MobileNetV2 on IR modality, 3 classes, 98.4% test accuracy
 - **Depth prefilter**: median depth < 1463mm = pig present (50px bar margin)
 - **Crop box (TOF)**: (120, 30, 500, 480) in config.py
-- **Pig ID overflow**: IDs > 19 normalized with `% 20`
+- **Pig ID policy (v1.1)**: `posture/id_corrections.py` — known magnet rules, then overflow IDs ≥ 20 and double captures are set aside (never `% 20`); see `data_quality.csv`
+- **Preprocessing**: one module, `posture/preprocess.py` (crop → bilinear resize → RGB → optional ImageNet norm); checkpoints store `normalize`/`crop`
 - **Vulva detection**: IR local darkness via DoG (3σ − 17σ), 95th percentile threshold
 - **Paper measurements**: CV = W × L × H (cubic volume, R²=0.92 in reference paper)
 - **Camera intrinsics**: fx=471.6, fy=471.4, cx=323.9, cy=246.8
@@ -107,7 +113,7 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 Audited all 3,766 timestamp folders. 97.6% (3,674) have exactly 20 pigs.
 
 ### Camera Magnet Corrections Applied
-All corrections are scripted in `fix_pig_ids.py` and `fix_predictions_csv.py`:
+All corrections live in `posture/id_corrections.py` (applied in memory by `run_inference.py`; `fix_pig_ids.py` / `fix_predictions_csv.py` import the same list):
 
 | Range | Folders | Issue | Fix |
 |-------|---------|-------|-----|
@@ -132,6 +138,8 @@ All corrections are scripted in `fix_pig_ids.py` and `fix_predictions_csv.py`:
 - `posture/regenerate_heatmap.py` — rebuild heatmaps from CSV in seconds (no 30-min re-run)
 
 ## Status
+
+**v1.1 (branch `improve/posture-v1.1`, Oct 2026, local until benchmarked on the lab PC):** fixed the `% 20` ID merge (overflow and double captures were added to pigs 0–3, inflating transitions), Colab notebook now actually uses the pig detector and the same ID rules, batched inference, data-quality + coverage reports, unified correction rules, shared preprocessing, honest grouped-CV benchmark, improved training recipe (pending lab-PC numbers). See CHANGELOG.md.
 
 **Task A (Posture Classification): SHIPPED.**
 - 98.4% test accuracy on held-out pigs 16–19

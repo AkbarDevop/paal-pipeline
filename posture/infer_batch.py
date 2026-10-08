@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Batch inference — run trained posture model on a new (unlabeled) OAK-D dataset.
 
+Prefer run_inference.py (faster, applies the pig-ID corrections, writes the
+data-quality report). This script is kept for multi-modal experiments.
+
 Scans timestamp folders, runs depth prefilter, predicts postures,
 and saves results to CSV + optional summary visuals.
 
@@ -48,7 +51,8 @@ from config import (
     IMG_SIZE,
 )
 from models import SingleModalModel
-from data_loader import MODALITY_CHANNELS, load_and_preprocess
+from data_loader import MODALITY_CHANNELS
+from preprocess import ckpt_preprocessing, crop_stall, normalize_batch, pick_device, read_image, resize_rgb_uint8
 
 # ── Depth prefilter (inline, no CSV needed) ────────────────────────────────
 
@@ -174,8 +178,17 @@ def get_image(frame, modality, use_cropped):
     return ""
 
 
-def load_frame_tensor(frame, modality, use_cropped):
-    """Load and preprocess frame into a model-ready tensor."""
+def _load_part(path, crop):
+    img = read_image(path, min_bytes=0)
+    if img is None:
+        return np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+    if crop:
+        img = crop_stall(img, path)   # same in-memory stall crop as training / run_inference
+    return resize_rgb_uint8(img, IMG_SIZE).astype(np.float32) / 255.0
+
+
+def load_frame_tensor(frame, modality, use_cropped, crop=True, normalize=None):
+    """Load and preprocess frame into a model-ready tensor (0..1, then ckpt normalization)."""
     imgs = []
 
     if modality in ("rgb", "rgb_depth", "rgb_ir", "all"):
@@ -183,35 +196,26 @@ def load_frame_tensor(frame, modality, use_cropped):
             path = get_image(frame, "rgb_aligned", use_cropped) or get_image(frame, "rgb", use_cropped)
         else:
             path = get_image(frame, "rgb", use_cropped)
-        img = load_and_preprocess(path)
-        imgs.append(img if img is not None else np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32))
+        imgs.append(_load_part(path, crop))
 
     if modality in ("ir", "rgb_ir", "all"):
-        path = get_image(frame, "ir", use_cropped)
-        img = load_and_preprocess(path)
-        imgs.append(img if img is not None else np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32))
+        imgs.append(_load_part(get_image(frame, "ir", use_cropped), crop))
 
     if modality in ("depth", "rgb_depth", "all"):
-        path = get_image(frame, "depth", use_cropped)
-        img = load_and_preprocess(path)
-        imgs.append(img if img is not None else np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32))
+        imgs.append(_load_part(get_image(frame, "depth", use_cropped), crop))
 
     if not imgs:
         return None
 
-    x = np.concatenate(imgs, axis=2)
-    return torch.from_numpy(x).permute(2, 0, 1)
+    x = torch.from_numpy(np.concatenate(imgs, axis=2)).permute(2, 0, 1)
+    return normalize_batch(x.unsqueeze(0), normalize)[0]
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def main(args):
     data_dir = args.data_dir or DATA_DIR
-    device = torch.device(
-        "mps" if torch.backends.mps.is_available()
-        else "cuda" if torch.cuda.is_available()
-        else "cpu"
-    )
+    device = pick_device()
     print(f"Device: {device}")
 
     # Load model
@@ -238,7 +242,8 @@ def main(args):
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    print(f"Loaded model: {model_path} ({backbone}, {num_classes} classes)")
+    normalize, crop = ckpt_preprocessing(ckpt)
+    print(f"Loaded model: {model_path} ({backbone}, {num_classes} classes, normalize={normalize})")
 
     class_names = POSTURE3_CLASSES
 
@@ -270,7 +275,7 @@ def main(args):
                 median_d = 0.0
 
             # Load image
-            x = load_frame_tensor(frame, args.modality, args.use_cropped)
+            x = load_frame_tensor(frame, args.modality, args.use_cropped, crop=crop, normalize=normalize)
             if x is None:
                 skipped_no_image += 1
                 continue

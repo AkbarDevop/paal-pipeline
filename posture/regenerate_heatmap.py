@@ -8,7 +8,7 @@ re-running inference, or to tweak heatmap settings.
 Usage:
     python regenerate_heatmap.py                              # from default outputs/predictions.csv
     python regenerate_heatmap.py --csv path/to/predictions.csv
-    python regenerate_heatmap.py --no-normalize               # show raw pig IDs (no modulo)
+    python regenerate_heatmap.py --no-normalize               # show raw camera IDs
 """
 
 import argparse
@@ -55,10 +55,19 @@ def load_csv(csv_path):
 
 def generate_heatmap(results, out_path, title="Posture Timeline Heatmap",
                      normalize=True, fixed_range=None):
-    """Generate heatmap from prediction rows."""
+    """Generate heatmap from prediction rows.
+
+    normalize=True keeps the fixed 0-19 stall axis. IDs are cleaned first with
+    the same policy as run_inference (known corrections, overflow and double
+    captures dropped) instead of v1.0's `pid % 20`, which merged overflow
+    captures into pigs 0-3.
+    """
     if normalize:
-        for r in results:
-            r["pig_id"] = r["pig_id"] % 20
+        if results and "id_status" not in results[0]:
+            from id_corrections import assign_ids
+            assign_ids(results, policy="strict")
+            results = [r for r in results if r["include"]]
+        results = [r for r in results if 0 <= r["pig_id"] < 20]
 
     all_pids = sorted(set(r["pig_id"] for r in results))
     if normalize:
@@ -145,7 +154,7 @@ def main():
     parser.add_argument("--csv", default=os.path.join(OUTPUT_DIR, "predictions.csv"),
                         help="Path to predictions CSV")
     parser.add_argument("--no-normalize", action="store_true",
-                        help="Show raw pig IDs without modulo normalization")
+                        help="Show raw camera IDs (no correction rules / no dedupe)")
     parser.add_argument("--output", default=None, help="Output PNG path")
     args = parser.parse_args()
 

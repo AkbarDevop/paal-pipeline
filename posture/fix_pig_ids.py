@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Fix pig ID labeling errors in specific timestamp folder ranges.
 
-Applies manual corrections based on visual inspection of heatmap data.
-Currently handles the 20260213-13-41-49 to 20260213-19-01-34 range
-where a camera magnet issue caused pig ID errors.
+Applies manual corrections based on visual inspection of heatmap data
+(rules in id_corrections.py). Dry run by default.
+
+You normally do NOT need this: run_inference.py applies the same rules in
+memory without touching the raw data (lab rule: never modify raw folders).
+Use --apply only on a copy of the data.
 
 Usage:
     python fix_pig_ids.py "C:\\PAAL_data\\Fed_pig\\Pictures_OAk" --dry-run    # preview changes
-    python fix_pig_ids.py "C:\\PAAL_data\\Fed_pig\\Pictures_OAk"              # apply changes
+    python fix_pig_ids.py "D:\\copy_of_data" --apply                              # apply to a COPY
 """
 
 import argparse
@@ -18,31 +21,10 @@ FOLDER_RE = re.compile(r"^\d{8}-\d{2}-\d{2}-\d{2}$")
 PIG_FILE_RE = re.compile(r"^pig(\d+)_(.+)$")
 
 # ── Correction rules ────────────────────────────────────────────────────────
-# Each rule: (start_folder, end_folder, list of actions)
-# Actions: ("delete", pig_id) or ("rename", from_pig_id, to_pig_id)
-
-CORRECTIONS = [
-    {
-        "name": "02/13 camera magnet issue — pig19 duplication",
-        "start": "20260213-13-41-49",
-        "end": "20260213-19-01-34",
-        "actions": [
-            ("delete", 19),       # pig19 = dup of pig18
-            ("rename", 20, 19),   # pig20 = real pig19
-            ("delete_gte", 21),   # pig21+ = duplicates
-        ],
-    },
-    {
-        "name": "02/18 camera magnet issue — pig19 duplication",
-        "start": "20260218-15-33-04",
-        "end": "20260218-19-00-39",
-        "actions": [
-            ("delete", 19),       # pig19 = dup of pig18
-            ("rename", 20, 19),   # pig20 = real pig19
-            ("delete_gte", 21),   # pig21+ = duplicates
-        ],
-    },
-]
+# Shared with run_inference.py / fix_predictions_csv.py (id_corrections.py).
+import sys as _sys, pathlib as _pathlib
+_sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
+from id_corrections import CORRECTIONS  # noqa: E402
 
 
 def get_folders_in_range(data_dir, start, end):
@@ -72,45 +54,34 @@ def apply_correction(data_dir, rule, dry_run=True):
         deleted = []
         renamed = []
 
+        # Plan every file first, then delete before renaming, so a rename like
+        # pig20 -> pig19 never collides with the pig19 duplicate it replaces
+        # (v1.0 renamed in os.listdir order and could skip the real pig 19).
+        to_delete, to_rename = [], []
         for fname in files:
             m = PIG_FILE_RE.match(fname)
             if not m:
                 continue
             pid = int(m.group(1))
             rest = m.group(2)
+            if pid in rule["delete_pids"] or pid >= rule["delete_gte"]:
+                to_delete.append(fname)
+            elif pid in rule["rename"]:
+                to_rename.append((fname, f"pig{rule['rename'][pid]}_{rest}"))
 
-            for action in rule["actions"]:
-                if action[0] == "delete" and pid == action[1]:
-                    fpath = os.path.join(folder_path, fname)
-                    if dry_run:
-                        deleted.append(fname)
-                    else:
-                        os.remove(fpath)
-                        deleted.append(fname)
-
-                elif action[0] == "rename" and pid == action[1]:
-                    new_pid = action[2]
-                    new_fname = f"pig{new_pid}_{rest}"
-                    src = os.path.join(folder_path, fname)
-                    dst = os.path.join(folder_path, new_fname)
-                    if dry_run:
-                        renamed.append((fname, new_fname))
-                    else:
-                        # Check for conflict
-                        if os.path.exists(dst):
-                            # Target exists — skip to avoid overwrite
-                            print(f"  WARNING: {dst} already exists, skipping rename of {fname}")
-                            continue
-                        os.rename(src, dst)
-                        renamed.append((fname, new_fname))
-
-                elif action[0] == "delete_gte" and pid >= action[1]:
-                    fpath = os.path.join(folder_path, fname)
-                    if dry_run:
-                        deleted.append(fname)
-                    else:
-                        os.remove(fpath)
-                        deleted.append(fname)
+        for fname in to_delete:
+            if not dry_run:
+                os.remove(os.path.join(folder_path, fname))
+            deleted.append(fname)
+        for fname, new_fname in to_rename:
+            src = os.path.join(folder_path, fname)
+            dst = os.path.join(folder_path, new_fname)
+            if not dry_run:
+                if os.path.exists(dst):
+                    print(f"  WARNING: {dst} already exists, skipping rename of {fname}")
+                    continue
+                os.rename(src, dst)
+            renamed.append((fname, new_fname))
 
         if deleted or renamed:
             total_deleted += len(deleted)
@@ -134,8 +105,13 @@ def main():
     parser = argparse.ArgumentParser(description="Fix pig ID labeling errors")
     parser.add_argument("data_dir", help="Path to OAK-D data folder")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Preview changes without applying them")
+                        help="Preview changes without applying them (default)")
+    parser.add_argument("--apply", action="store_true",
+                        help="Actually delete/rename files. Only on a COPY of the data: lab rule is "
+                             "never to modify the raw data folders. run_inference.py already applies "
+                             "these corrections in memory, so this script is rarely needed.")
     args = parser.parse_args()
+    args.dry_run = not args.apply
 
     if not os.path.isdir(args.data_dir):
         print(f"Error: {args.data_dir} is not a directory")
@@ -151,7 +127,7 @@ def main():
     print(f"\n{'='*60}")
     if args.dry_run:
         print(f"DRY RUN COMPLETE: would delete {total_d} files, rename {total_r} files")
-        print(f"Run without --dry-run to apply changes")
+        print(f"Add --apply to change files (only on a copy of the raw data)")
     else:
         print(f"DONE: deleted {total_d} files, renamed {total_r} files")
     print(f"{'='*60}")
