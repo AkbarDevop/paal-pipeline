@@ -23,7 +23,7 @@ Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC
 - **Shared preprocessing (`posture/preprocess.py`).** Training, inference, eval and the notebook now use the same crop, resize and normalization.
   - Checkpoints record `normalize` and `crop`.
   - v1.0 checkpoints load unchanged and give identical predictions (checked: 761/761 frames, max confidence difference 0.0).
-- **Batched inference with parallel image loading.** Default batch size is 64 on GPU/MPS and 4 on CPU. Large batches are slower than single frames for MobileNetV2 on a 2-core CPU.
+- **Batched inference.** Default batch size is 64 on GPU/MPS and 4 on CPU. Measured on the Mac (MPS, 1,141 synthetic frames): prediction step 7 s vs 15 s for v1.0, whole run 10.5 s vs 19.6 s, identical predictions. Loader worker processes are off by default on macOS/Windows (they made the same run 3x slower); `--workers 4` is opt-in.
 - **New outputs.**
   - Per-class probabilities and the pig-presence probability for each frame.
   - A `posture_changed` column.

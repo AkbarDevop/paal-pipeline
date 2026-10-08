@@ -934,7 +934,8 @@ def main():
                         help="Frames per forward pass (default: 64 on GPU/MPS, 4 on CPU — "
                              "large batches are slower on CPU for MobileNetV2)")
     parser.add_argument("--workers", type=int, default=None,
-                        help="Image loader workers (default: min(4, cpu_count-1); 0 = main process)")
+                        help="Image loader worker processes (default 0 on macOS/Windows, where spawning "
+                             "workers made a 1k-frame run 3x slower; up to 4 on Linux)")
     parser.add_argument("--id-policy", choices=["strict", "modulo"], default="strict",
                         help="strict (default): apply known corrections, drop overflow IDs and "
                              "duplicate captures; modulo: v1.0 behaviour (pid %% 20)")
@@ -961,7 +962,7 @@ def main():
     if args.batch_size is None:
         args.batch_size = 4 if device.type == "cpu" else 64
     if args.workers is None:
-        args.workers = max(0, min(4, (os.cpu_count() or 1) - 1))
+        args.workers = max(0, min(4, (os.cpu_count() or 1) - 1)) if sys.platform.startswith("linux") else 0
     print(f"Device: {device}")
 
     if not os.path.exists(args.model):
