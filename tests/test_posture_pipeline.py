@@ -313,6 +313,48 @@ def test_ground_truth_sheet_parsing():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_ground_truth_reads_lucas_layout():
+    """Untimed rows between timed ones, a note row, an 'X' (empty stall), per-sow totals under
+    the block, a 'completo' sheet overlapping the plain one, and a copy sheet to skip."""
+    import openpyxl
+    from datetime import time as dtime
+    from eval_ground_truth import read_ground_truth
+    tmp = tempfile.mkdtemp(prefix="paal_gt2_")
+    try:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "27"
+        ws.append([None] + [float(p) for p in range(20)])
+        ws.append([dtime(0, 5)] + [0.0] * 19 + [2.0])
+        ws.append([None] + [1.0] + [0.0] * 19)                  # untimed -> 00:10/00:11
+        ws.append([dtime(0, 16)] + [0.0] * 18 + ["X", 0.0])     # X = empty stall 18
+        ws.append([None] + ["Now sow 18"] + [None] * 19)         # note row, skipped
+        ws.append([dtime(0, 21)] + [2.0] * 20)
+        ws.append([None] + [3] * 20)                             # totals: block ends
+        ws.append(["standing"] + [25.0] * 20)
+        ws2 = wb.create_sheet("27 completo")
+        ws2.append([None] + [float(p) for p in range(20)])
+        ws2.append([dtime(0, 5)] + [1.0] * 20)                   # conflicts with '27' at 00:05
+        ws2.append([dtime(9, 0)] + [2.0] * 20)                   # daytime row only here
+        wb.create_sheet("Cópia de 27").append([None] + [float(p) for p in range(20)])
+        path = os.path.join(tmp, "gt.xlsx")
+        wb.save(path)
+        codes = {"0": "lying", "1": "sitting", "2": "standing"}
+        gt = read_ground_truth(path, codes, 2026, verbose=False)
+        by = {(g["time"].strftime("%H:%M"), g["pig_id"]): g for g in gt}
+        assert by[("00:05", 0)]["label"] == "sitting" and by[("00:05", 0)]["sheet"] == "27 completo"
+        assert by[("09:00", 5)]["label"] == "standing"
+        mid = [g for g in gt if g["time_source"] == "interpolated"]
+        assert len(mid) == 20 and {g["time"].strftime("%H:%M") for g in mid} == {"00:10"}
+        assert by[("00:10", 0)]["label"] == "sitting"
+        assert ("00:16", 18) not in by and by[("00:16", 19)]["label"] == "lying"
+        assert by[("00:21", 7)]["label"] == "standing"
+        assert not any(g["label"] not in codes.values() for g in gt)
+        assert len(gt) == 20 + 20 + 20 + 19 + 20      # 00:05, 09:00, 00:10, 00:16 (no X), 00:21
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_rules_not_applied_twice_to_corrected_data():
     # v1.0 fix scripts already turned pig20 into pig19 here: re-applying the 02/13
     # rule would delete the real pig 19 (delete_pids [19]).

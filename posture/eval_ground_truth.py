@@ -1,8 +1,11 @@
 """Score predictions against Lucas's time-stamped posture ground truth.
 
 Lucas's "sow position.xlsx" has one sheet per day (sheet "26" = Feb 6,
-"210" = Feb 10), a time column and one column per pig with codes
-0 = lying, 1 = sitting, 2 = standing, recorded about every 10 minutes.
+"210" = Feb 10, up to "215"), one row per robot pass (~5.5 min) with the time typed
+on about every other row, one column per pig with codes 0 = lying, 1 = sitting,
+2 = standing ('X' = empty stall), and his per-sow totals under each block. Some
+days also have 'completo' / 'completo alternado' sheets (daytime too) and a
+'Cópia' copy; all are merged into one label per pig per minute.
 The OAK frames for those days are in OAK_0206_0211 on the room-127 PC
 (found by Dr. Zhou on Apr 19), so this is the first independent test of the
 model: different days from the training labels (Jan 23 - Feb 3) and labelled
@@ -16,7 +19,7 @@ If the sheet layout differs, run with --inspect first: it prints the first
 rows of every sheet so the column/row options can be set.
 
 Matching: each ground-truth cell (time, pig) is paired with the prediction
-for the same pig whose timestamp is closest, within --tolerance minutes.
+for the same pig whose timestamp is closest, within --tolerance minutes (default 3; his rows are ~5.5 min apart).
 Reports accuracy / macro-F1 / confusion for raw and smoothed predictions and
 compares nightly transition counts (ground truth vs predicted).
 
@@ -36,7 +39,7 @@ import re
 import sys
 import pathlib
 from collections import defaultdict
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -116,35 +119,143 @@ def find_layout(rows):
     return None, None, {}
 
 
-def read_ground_truth(path, codes, year, stall_offset=0, sheets=None):
+SKIP_SHEET_RE = re.compile(r"c[oó]pia|copy", re.I)
+ROW_MINUTES = 5.5          # one camera pass, used only when a time cannot be interpolated
+
+
+def sheet_priority(name):
+    """Several sheets can cover the same day. Prefer every-pass sheets ('210 completo', '210')
+    over the every-other-pass 'completo alternado' ones."""
+    n = name.lower()
+    return 2 if "altern" in n else (0 if "complet" in n else 1)
+
+
+SUMMARY_LABELS = {"standing", "sitting", "laying down", "lying", "lying down", "total"}
+
+
+def _is_number(k):
+    try:
+        float(k)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def observation_rows(rows, hdr, tcol, pigs, codes):
+    """Rows of the observation block. Empty rows and note rows ('Now sow 18', 'Sow 0 culled')
+    are skipped; 'X' cells (empty stall) and other text cells are kept as non-codes. The block
+    ends at the per-sow totals: a row with a number that is not a posture code, or the
+    'standing' / 'sitting' / 'laying down' labels."""
+    block = []
+    for i in range(hdr + 1, len(rows)):
+        r = rows[i]
+        t_raw = r[tcol] if tcol < len(r) else None
+        if isinstance(t_raw, str) and t_raw.strip().lower() in SUMMARY_LABELS:
+            break
+        keys = []
+        for j in pigs:
+            v = r[j] if j < len(r) else None
+            if v is None or str(v).strip() == "":
+                keys.append(None)
+            elif isinstance(v, (int, float)) and float(v).is_integer():
+                keys.append(str(int(v)))
+            else:
+                keys.append(str(v).strip())
+        if any(k is not None and _is_number(k) and k not in codes for k in keys):
+            break                                     # per-sow totals start here
+        t = to_time(t_raw)
+        if t is None and not any(k in codes for k in keys if k):
+            continue                                  # empty or note row
+        block.append((i, t, keys))
+    return block
+
+
+def assign_times(block, day):
+    """Lucas typed the time on about every other row; rows between are interpolated from the
+    recorded times around them (never across gaps over 30 min). Returns
+    [(datetime, keys, source)] with source 'recorded' or 'interpolated'. A recorded time that
+    does not fit between its recorded neighbours is treated as a typo and interpolated."""
+    times = [datetime.combine(day, t) if t else None for _, t, _ in block]
+    rec = [k for k, t in enumerate(times) if t is not None]
+    bad = set()
+    for a, k in enumerate(rec):
+        p = times[rec[a - 1]] if a > 0 else None
+        n = times[rec[a + 1]] if a + 1 < len(rec) else None
+        t = times[k]
+        if p is not None and n is not None:
+            if p < n and not (p < t < n):
+                bad.add(k)
+        elif p is not None and t <= p:
+            bad.add(k)
+        elif n is not None and t >= n:
+            bad.add(k)
+    for k in bad:                       # a mistyped time is re-derived from its neighbours
+        times[k] = None
+    rec = [k for k in rec if k not in bad]
+    out = []
+    for k, (_, _, keys) in enumerate(block):
+        t = times[k]
+        if t is not None:
+            out.append((t, keys, "recorded"))
+            continue
+        prev = max((j for j in rec if j < k), default=None)
+        nxt = min((j for j in rec if j > k), default=None)
+        if prev is not None and nxt is not None and (times[nxt] - times[prev]).total_seconds() <= 1800:
+            t = times[prev] + (times[nxt] - times[prev]) * ((k - prev) / (nxt - prev))
+        elif prev is not None and (k - prev) <= 2:
+            t = times[prev] + timedelta(minutes=ROW_MINUTES * (k - prev))
+        elif nxt is not None and (nxt - k) <= 2:
+            t = times[nxt] - timedelta(minutes=ROW_MINUTES * (nxt - k))
+        else:
+            continue
+        out.append((t.replace(second=0, microsecond=0), keys, "interpolated"))
+    return out
+
+
+def read_ground_truth(path, codes, year, stall_offset=0, sheets=None, verbose=True):
+    """Lucas's sow position workbook -> [{time, pig_id, label, sheet, time_source}].
+
+    Handles his layout: one row per robot pass (~5.5 min), time typed on about every other
+    row, per-sow totals under the block, extra 'completo' / 'alternado' / 'Cópia' sheets for
+    some days (copies skipped; overlapping sheets merged, one label per pig per minute)."""
     import openpyxl
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    out = []
-    for name in wb.sheetnames:
-        if sheets and name not in sheets:
+    names = [n for n in wb.sheetnames if (not sheets or n in sheets)]
+    seen, out, conflicts = {}, [], 0
+    for name in sorted(names, key=sheet_priority):
+        if SKIP_SHEET_RE.search(name):
+            if verbose:
+                print(f"  sheet '{name}': skipped (copy of another sheet)")
             continue
         day = sheet_date(name, year)
         rows = [list(r) for r in wb[name].iter_rows(values_only=True)]
         hdr, tcol, pigs = find_layout(rows)
         if day is None or hdr is None or tcol is None:
-            print(f"  sheet '{name}': skipped (could not find date/time/pig columns; try --inspect)")
+            if verbose:
+                print(f"  sheet '{name}': skipped (could not find date/time/pig columns; try --inspect)")
             continue
-        n = 0
-        for r in rows[hdr + 1:]:
-            t = to_time(r[tcol]) if tcol < len(r) else None
-            if t is None:
-                continue
-            ts = datetime.combine(day, t)
-            for j, pig in pigs.items():
-                v = r[j] if j < len(r) else None
-                if v is None or str(v).strip() == "":
+        block = observation_rows(rows, hdr, tcol, list(pigs), codes)
+        n = dup = 0
+        for ts, keys, source in assign_times(block, day):
+            for (j, pig), key in zip(pigs.items(), keys):
+                label = codes.get(key) if key else None
+                if not label:
                     continue
-                key = str(int(v)) if isinstance(v, (int, float)) and float(v).is_integer() else str(v).strip()
-                label = codes.get(key)
-                if label:
-                    out.append({"time": ts, "pig_id": pig - stall_offset, "label": label})
-                    n += 1
-        print(f"  sheet '{name}' -> {day}: {n} labels, pigs {sorted(pigs.values())[:3]}..{sorted(pigs.values())[-1]}")
+                k = (ts, pig - stall_offset)
+                if k in seen:
+                    dup += 1
+                    conflicts += int(seen[k] != label)
+                    continue
+                seen[k] = label
+                out.append({"time": ts, "pig_id": pig - stall_offset, "label": label, "sheet": name,
+                            "time_source": source})
+                n += 1
+        if verbose:
+            print(f"  sheet '{name}' -> {day}: {len(block)} passes, {n} new labels"
+                  + (f", {dup} already in another sheet" if dup else ""))
+    if verbose and conflicts:
+        print(f"  {conflicts} pig-times labelled differently in two sheets (first sheet kept)")
+    out.sort(key=lambda g: (g["time"], g["pig_id"]))
     return out
 
 
@@ -243,7 +354,8 @@ def main():
     ap.add_argument("--codes", default="0:lying,1:sitting,2:standing",
                     help="Ground-truth code mapping (default from Lucas's sheet)")
     ap.add_argument("--year", type=int, default=2026)
-    ap.add_argument("--tolerance", type=float, default=6.0, help="Max minutes between GT and frame")
+    ap.add_argument("--tolerance", type=float, default=3.0,
+                    help="Max minutes between GT and frame (Lucas's rows are ~5.5 min apart)")
     ap.add_argument("--stall-offset", type=int, default=0,
                     help="Subtract from GT pig numbers if the sheet counts stalls from 1")
     ap.add_argument("--sheets", nargs="*", default=None)
