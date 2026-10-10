@@ -76,6 +76,17 @@ class FileIndex:
         if os.path.exists(csv_path):
             return csv_path
         if self.roots:
+            # fast path: <root>/<timestamp folder>/<file>, so a big network share is not walked
+            parts = [x for x in csv_path.replace("\\", "/").split("/") if x]
+            if len(parts) >= 2:
+                folder_seen = False
+                for root in self.roots:
+                    cand = os.path.join(root, parts[-2], parts[-1])
+                    if os.path.exists(cand):
+                        return cand
+                    folder_seen = folder_seen or os.path.isdir(os.path.join(root, parts[-2]))
+                if folder_seen:          # folder is there but this file is not: no full walk
+                    return _fix_path(csv_path)
             if self._index is None:
                 self._build()
             hit = self._index.get(os.path.basename(csv_path.replace("\\", "/")))

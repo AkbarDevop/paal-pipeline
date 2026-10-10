@@ -46,7 +46,7 @@ Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC
 - **`posture/eval_ground_truth.py`.** Scores predictions against Lucas's time-stamped `sow position.xlsx` (Feb 6–10, all 20 pigs every ~10 min). This is the first independent test set: different days and a different labeller from training. It also compares nightly transition counts: truth vs predicted vs smoothed.
 - **`posture_matrix.csv` output.** Rows are timestamp folders, columns are pig0…pig19 — the format Fengkai asked for on Mar 15.
 - **`--data-root`.** Label CSVs (Mac absolute paths) now resolve on any machine by file name.
-- **Tests.** `tests/test_posture_pipeline.py` has 14 checks on synthetic OAK-D folders with no lab data needed. It covers:
+- **Tests.** `tests/test_posture_pipeline.py` has 15 checks on synthetic OAK-D folders with no lab data needed. It covers:
   - the ID policy
   - smoothing
   - the end-to-end CLI
@@ -67,7 +67,7 @@ Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC
   - `train.py` now defaults to `--class-set posture3`.
   - `infer_batch.py` has a `--no-crop` option.
   - Sheet names like `02_06` now parse.
-- **Tests.** There are now 14 checks.
+- **Tests.** There are now 15 checks.
 - **Presence audit.** The fixed depth gate (median stall depth under 1,463 mm) separates lying sows from an empty floor by only a few centimetres: in the labelled set, lying frames have a median of 1,318 mm, the deepest is 1,461 mm, and the nearest frame called empty is 1,466 mm. Because frames were labelled only after passing the gate, any lying sows it rejected are invisible in the labels. To measure this:
   - `run_inference.py` writes `skipped_frames.csv`: every frame that never reached the posture model, with the reason (depth, detector, corrupt), median depth and detector probability.
   - `eval_ground_truth.py` adds a presence check. Every cell in Lucas's sheet has a sow, so a cell with no prediction is a miss. Each miss is explained (depth gate, detector, unreadable, ID policy, no capture) and broken down by the recorded posture, then written to `ground_truth_misses.csv`.

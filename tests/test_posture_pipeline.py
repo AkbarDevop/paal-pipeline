@@ -115,6 +115,24 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
+def test_file_index_finds_label_images_without_walking_share():
+    from data_loader import FileIndex
+    root = tempfile.mkdtemp(prefix="paal_idx_")
+    try:
+        os.makedirs(os.path.join(root, "20260123-14-46-37"))
+        open(os.path.join(root, "20260123-14-46-37", "pig0_ir_vis_a.jpg"), "w").close()
+        os.makedirs(os.path.join(root, "round1", "20260124-10-00-00"))
+        open(os.path.join(root, "round1", "20260124-10-00-00", "pig1_ir_vis_b.jpg"), "w").close()
+        idx = FileIndex([root])
+        mac = "/Users/akbar/Downloads/paal_pipeline/data/20260123-14-46-37/pig0_ir_vis_a.jpg"
+        assert idx.resolve(mac) == os.path.join(root, "20260123-14-46-37", "pig0_ir_vis_a.jpg")
+        assert idx._index is None, "direct <root>/<folder>/<file> hit must not walk the whole root"
+        win = "C:" + chr(92) + "x" + chr(92) + "20260124-10-00-00" + chr(92) + "pig1_ir_vis_b.jpg"
+        assert idx.resolve(win) == os.path.join(root, "round1", "20260124-10-00-00", "pig1_ir_vis_b.jpg")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_scan_folder_date_range():
     from run_inference import scan_folder
     tmp = tempfile.mkdtemp(prefix="paal_test_")
