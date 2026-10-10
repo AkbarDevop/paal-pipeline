@@ -9,6 +9,7 @@ the timestamp folders) and files are found by name on any machine.
 
 import csv
 import os
+import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
@@ -55,12 +56,40 @@ def load_and_preprocess(path, size=IMG_SIZE):
 
 # ── path resolution ─────────────────────────────────────────────────────────
 
+TS_FOLDER_RE = re.compile(r"^\d{8}-\d{2}-\d{2}-\d{2}$")
+
+
+def timestamp_folders(root):
+    """{timestamp folder name: [paths]} directly under root or one level down
+    (round folders such as E:\\Pig_data\\Pictures_OAK\\2026-01-23_02-03\\<timestamp>).
+    Lists directories only, so it stays fast on the network share."""
+    out = {}
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return out
+    for e in entries:
+        if not e.is_dir():
+            continue
+        if TS_FOLDER_RE.match(e.name):
+            out.setdefault(e.name, []).append(e.path)
+            continue
+        try:
+            for e2 in os.scandir(e.path):
+                if e2.is_dir() and TS_FOLDER_RE.match(e2.name):
+                    out.setdefault(e2.name, []).append(e2.path)
+        except OSError:
+            pass
+    return out
+
+
 class FileIndex:
     """Find label-CSV images by file name under one or more data roots."""
 
     def __init__(self, roots=None):
         self.roots = [r for r in (roots or []) if r]
         self._index = None
+        self._folders = None
 
     def _build(self):
         self._index = {}
@@ -76,16 +105,25 @@ class FileIndex:
         if os.path.exists(csv_path):
             return csv_path
         if self.roots:
-            # fast path: <root>/<timestamp folder>/<file>, so a big network share is not walked
+            # fast path: find the timestamp folder (directory listing only), then the file,
+            # so a big network share is never walked file by file
             parts = [x for x in csv_path.replace("\\", "/").split("/") if x]
             if len(parts) >= 2:
-                folder_seen = False
-                for root in self.roots:
-                    cand = os.path.join(root, parts[-2], parts[-1])
-                    if os.path.exists(cand):
-                        return cand
-                    folder_seen = folder_seen or os.path.isdir(os.path.join(root, parts[-2]))
-                if folder_seen:          # folder is there but this file is not: no full walk
+                if self._folders is None:
+                    self._folders = {}
+                    for root in self.roots:
+                        for name, paths in timestamp_folders(root).items():
+                            self._folders.setdefault(name, []).extend(paths)
+                folders = self._folders.get(parts[-2])
+                if folders:
+                    for d in folders:
+                        cand = os.path.join(d, parts[-1])
+                        if os.path.exists(cand):
+                            return cand
+                    return _fix_path(csv_path)   # folder is there but this file is not: no full walk
+                if self._folders:
+                    # the roots do hold timestamp folders, just not this one: report it missing
+                    # instead of walking every file on a (possibly network) drive
                     return _fix_path(csv_path)
             if self._index is None:
                 self._build()

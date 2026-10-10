@@ -47,6 +47,7 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 - `posture/preprocess.py` — Shared crop/resize/normalize for training, inference and eval
 - `posture/temporal.py` — Per-pig temporal smoothing (optional `--smooth 3`)
 - `posture/eval_ground_truth.py` — Score predictions vs Lucas's `sow position.xlsx` (Feb 6–10, independent test)
+- `posture/check_label_paths.py` — Which labelled frames exist under the data roots (run before train/benchmark)
 - `posture/review_presence.py` — Contact sheets for auditing the pig-presence decision (GT misses or near-threshold skips)
 - `posture/benchmark.py` — Before/after benchmark (shipped model, v1.0 vs v1.1 recipe, grouped CV, smoothing check)
 - `posture/fix_pig_ids.py` / `posture/fix_predictions_csv.py` — Legacy: file renames (dry-run default) / pre-v1.1 CSV patch
