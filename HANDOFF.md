@@ -209,7 +209,7 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 | `vulva/truth.py` | Reads Lucas's per-sow sheets (DAY, DATE, V. W., V. L., V. V., MORNING/EVENING heat = 20). V. V. is W × L / 200. |
 | `vulva/make_seg_labels.py` | Manual table + masks → `labels/vulva_seg_labels.csv` (finds IR frames again under `--data-root`). |
 | `vulva/seg_model.py` | U-Net with ResNet-18 encoder; stall crop 380 × 450 → 320 × 384; masks mapped back to 640 × 480. |
-| `vulva/train_seg.py` | CV by sow: presence precision / recall / F1 + confusion matrix, IoU / Dice on visible frames; saves the final model. |
+| `vulva/train_seg.py` | CV by sow: presence precision / recall / F1 + confusion matrix, IoU / Dice on visible frames; picks the mask threshold on held-out sows; saves the final model. |
 | `vulva/select_frames.py` | Standing frames from `predictions.csv` (confidence ≥ 0.6, ID problems dropped), optional time windows and cap per sow-day. |
 | `vulva/measure3d.py` | Skin plane from a ring around the mask (RANSAC); W and L along the in-plane axes (tilt removed), height above the plane, volume, quality numbers. Checked on synthetic tilted vulvas: within 1 mm and 4% volume up to 60° tilt. |
 | `vulva/daily.py` | Good frames → per sow-day median and MAD, % change from the first 2 days, join with calipers and heat days. |

@@ -5,7 +5,7 @@
 New scripts in `vulva/`, all reading raw folders only and writing under `outputs/`:
 
 - `truth.py` reads Lucas's caliper + heat workbook (`Feb_2026.xlsx`) into a sow-day table and prints each sow's vulva rise during heat.
-- `make_seg_labels.py`, `seg_model.py`, `train_seg.py`: U-Net (ResNet-18 encoder) trained on the existing manual masks, cross-validated by sow; reports presence precision / recall / F1 with the confusion matrix, and IoU / Dice.
+- `make_seg_labels.py`, `seg_model.py`, `train_seg.py`: U-Net (ResNet-18 encoder) trained on the existing manual masks, cross-validated by sow; reports presence precision / recall / F1 with the confusion matrix, and IoU / Dice. The mask threshold is tuned on the held-out sows (over-sized masks inflate width and length) and stored in the checkpoint.
 - `select_frames.py`: standing frames from the posture predictions, optional feeding-time windows.
 - `measure3d.py`: width, length, height and volume in mm from the ToF depth, measured on the fitted skin plane so camera tilt does not shorten the length.
 - `daily.py`, `run_vulva.py`: one command from posture predictions to one value per sow per day, compared with the calipers and heat days.

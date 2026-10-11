@@ -88,7 +88,7 @@ class SegData(Dataset):
         return to_tensor(g), torch.from_numpy(m.astype(np.float32))[None]
 
 
-def loss_fn(logits, target, pos_weight=3.0):
+def loss_fn(logits, target, pos_weight=1.0):
     bce = F.binary_cross_entropy_with_logits(logits, target, pos_weight=torch.tensor(pos_weight, device=logits.device))
     p = torch.sigmoid(logits)
     inter = (p * target).sum((1, 2, 3))
@@ -99,7 +99,7 @@ def loss_fn(logits, target, pos_weight=3.0):
     return bce + dice
 
 
-def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_size=8, log=None):
+def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_size=8, log=None, pos_weight=1.0):
     model = VulvaUNet(pretrained=pretrained).to(device)
     pos = [it for it in train_items if it["mask"].any()]
     neg = [it for it in train_items if not it["mask"].any()]
@@ -116,7 +116,7 @@ def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_siz
         for x, y in dl:
             x, y = x.to(device), y.to(device)
             opt.zero_grad()
-            loss = loss_fn(model(x), y)
+            loss = loss_fn(model(x), y, pos_weight)
             loss.backward()
             opt.step()
             sched.step()
@@ -127,17 +127,37 @@ def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_siz
 
 
 @torch.no_grad()
-def predict_items(model, items, device, threshold=0.5):
+def predict_probs(model, items, device):
     model.eval()
     out = []
     for i in range(0, len(items), 16):
         x = torch.stack([to_tensor(it["gray"]) for it in items[i:i + 16]]).to(device)
-        for p in torch.sigmoid(model(x))[:, 0].cpu().numpy():
-            m = largest_component((p >= threshold).astype(np.uint8))
-            if m.sum() < MIN_AREA:
-                m[:] = 0
-            out.append(m)
+        out.extend(torch.sigmoid(model(x))[:, 0].cpu().numpy().astype(np.float16))
     return out
+
+
+def masks_from_probs(probs, threshold=0.5):
+    out = []
+    for p in probs:
+        m = largest_component((p.astype(np.float32) >= threshold).astype(np.uint8))
+        if m.sum() < MIN_AREA:
+            m[:] = 0
+        out.append(m)
+    return out
+
+
+def predict_items(model, items, device, threshold=0.5):
+    return masks_from_probs(predict_probs(model, items, device), threshold)
+
+
+def pick_threshold(items, probs, grid=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)):
+    """Threshold with the best out-of-fold IoU while presence F1 stays within 0.02 of its best.
+    Over- or under-sized masks bias width and length, so this is tuned on held-out sows."""
+    scored = [(t, score(items, masks_from_probs(probs, t))) for t in grid]
+    best_f1 = max(s["presence_f1"] for _, s in scored)
+    ok = [(t, s) for t, s in scored if s["presence_f1"] >= best_f1 - 0.02 and s["iou_mean"] is not None]
+    t, s = max(ok, key=lambda ts: ts[1]["iou_mean"]) if ok else (0.5, dict(scored)[0.5])
+    return t, s, scored
 
 
 def score(items, preds):
@@ -177,6 +197,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--pos-weight", type=float, default=1.0,
+                    help="BCE weight on vulva pixels; above 1 grows masks (Dice already handles imbalance)")
     ap.add_argument("--no-pretrained", action="store_true", help="random init (tests / offline)")
     ap.add_argument("--out-model", default=os.path.join("models", "vulva_seg.pth"))
     ap.add_argument("--out-dir", default=os.path.join("outputs", "vulva_seg"))
@@ -208,24 +230,30 @@ def main():
         folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
         report["folds"] = {str(k): sorted(p for p, f in folds.items() if f == k) for k in range(args.folds)}
         oof = [None] * len(items)
+        oof_probs = [None] * len(items)
         per_fold = []
         for k in range(args.folds):
             tr = [it for it in items if folds[it["pig_id"]] != k]
             te_idx = [i for i, it in enumerate(items) if folds[it["pig_id"]] == k]
             log(f"Fold {k + 1}/{args.folds}: test sows {report['folds'][str(k)]} "
                 f"({len(te_idx)} frames, train {len(tr)})")
-            model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log)
-            preds = predict_items(model, [items[i] for i in te_idx], device)
-            for i, p in zip(te_idx, preds):
+            model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log, args.pos_weight)
+            probs = predict_probs(model, [items[i] for i in te_idx], device)
+            preds = masks_from_probs(probs, 0.5)
+            for i, p, pr in zip(te_idx, preds, probs):
                 oof[i] = p
+                oof_probs[i] = pr
             s = score([items[i] for i in te_idx], preds)
             per_fold.append(s)
             log(f"    presence F1 {s['presence_f1']}  IoU {s['iou_mean']}  Dice {s['dice_mean']}")
-        overall = score(items, oof)
-        report["cv"] = {"overall": overall, "per_fold": per_fold}
+        threshold, overall, by_thr = pick_threshold(items, oof_probs)
+        oof = masks_from_probs(oof_probs, threshold)
+        report["cv"] = {"overall": overall, "per_fold_at_0.5": per_fold, "threshold": threshold,
+                        "by_threshold": {str(t): {k: s[k] for k in ("presence_f1", "iou_mean", "area_error_mean")}
+                                         for t, s in by_thr}}
         c = overall["confusion"]
         log("")
-        log(f"Cross-validation (sows held out), {overall['frames']} frames:")
+        log(f"Cross-validation (sows held out), {overall['frames']} frames, mask threshold {threshold}:")
         log(f"  Vulva visible: precision {overall['presence_precision']}, recall {overall['presence_recall']}, "
             f"F1 {overall['presence_f1']}, accuracy {overall['presence_accuracy']}")
         log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
@@ -238,11 +266,12 @@ def main():
                 r = it["row"]
                 w.writerow([r["timestamp_folder"], r["pig_id"], r["pig_timestamp"], r["label"],
                             int(p.sum()), int(it["mask"].sum())])
-
+    else:
+        threshold = 0.5
     log("")
     log(f"Final model on all {len(items)} frames ...")
-    model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log)
-    save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": 0.5,
+    model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log, args.pos_weight)
+    save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold,
                                             "trained_on": len(items), "sows": pigs,
                                             "date": time.strftime("%Y-%m-%d")})
     log(f"Saved {args.out_model}  ({time.time() - t0:.0f} s)")
