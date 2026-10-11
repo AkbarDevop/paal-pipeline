@@ -52,12 +52,14 @@ python posture/run_inference.py /path/to/new/month/of/data
 ```
 
 That single command does the whole pipeline:
-1. Crops images to the stall region
-2. Filters out empty stalls (CNN pig-presence detector)
-3. Runs the posture classifier (MobileNetV2 on IR, 98.4% test accuracy)
-4. Generates the heatmap (`outputs/posture_heatmap.png`)
-5. Generates the predictions CSV (`outputs/predictions.csv`)
-6. Generates per-pig Excel reports + master workbook with daily statistics
+1. Scans every capture and cleans camera IDs (known magnet fixes from `posture/id_corrections.py`, overflow IDs 20+ and double captures set aside — no more `% 20`)
+2. Crops images to the stall region in memory (raw folders are never written to)
+3. Filters out empty stalls (depth prefilter + CNN pig-presence detector)
+4. Runs the posture classifier in batches (MobileNetV2 on IR: 98.4% on test pigs 16–19, 97.6% in 5-fold CV by pig, 91.3% against Lucas's independent labels for Feb 6–11, 94.1% at night)
+5. Writes `outputs/predictions.csv` (one row per stall per folder, with class probabilities and a `posture_changed` column), `predictions_excluded.csv`, `data_quality.csv` (folders with missing/extra/duplicate IDs) and `coverage_by_pig_day.csv`
+6. Generates heatmaps, per-pig Excel reports + master workbook with daily statistics
+
+Useful flags: `--start/--end` (folder date range, e.g. `--start 20260206 --end 20260211`), `--smooth 3` adds `smoothed_prediction_name` (do **not** use it for transition counts: against Lucas's labels it cut nightly transitions from 8.0 to 2.5 per sow), `--model PATH` to try another checkpoint, `--id-policy modulo` to reproduce v1.0 numbers, `--batch-size/--workers` for speed.
 
 ### Required model files
 
@@ -73,22 +75,29 @@ The input folder must contain timestamp subfolders in OAK-D format:
 ```
 /path/to/data/
 ├── 20260211-14-30-00/
-│   ├── ir_pig0_20260211-14-30-17.jpg
-│   ├── ir_pig1_20260211-14-30-18.jpg
-│   ├── ...
-│   ├── depth_pig0_20260211-14-30-17.raw
-│   └── rgb_pig0_20260211-14-30-17.jpg
+│   ├── pig0_ir_vis_20260211-14-30-17.jpg
+│   ├── pig0_depth_20260211-14-30-17.raw
+│   ├── pig0_rgb_20260211-14-30-17.jpg
+│   ├── pig1_ir_vis_20260211-14-30-18.jpg
+│   └── ...
 ├── 20260211-14-45-00/
 └── ...
 ```
 
-Files per pig: `ir_*.jpg` (used by classifier), `depth_*.raw` (used by detector), `rgb_*.jpg` (optional).
+Files per pig (pattern in `FILENAME_RE`): `pigN_ir_vis_*.jpg` (used by the classifier), `pigN_depth_*.raw` (used by the depth prefilter), `pigN_rgb_*.jpg` (optional). Legacy `*_cropped.jpg` files are recognised and never cropped twice.
 
-### Camera ID quirks — already handled
+### Camera ID quirks — already handled (v1.1)
 
-The OAK-D camera occasionally generates pig IDs > 19 due to magnet/overflow issues. The pipeline normalizes `pid % 20` automatically. For known specific date ranges where pig 19/20 are duplicates of pig 17/18, see `posture/fix_pig_ids.py` and `posture/fix_predictions_csv.py`. If you encounter new date ranges where IDs are corrupt:
-1. Add a new rule to the `CORRECTIONS` list in both `fix_pig_ids.py` (renames files) and `fix_predictions_csv.py` (rewrites predictions CSV)
-2. Re-run inference, or run `fix_predictions_csv.py` to patch existing predictions
+The OAK-D numbers pigs sequentially as it walks the stalls, so a misfiring stall magnet causes IDs > 19 and double captures. All rules live in one file, `posture/id_corrections.py`, and `run_inference.py` applies them in memory:
+
+- known bad ranges (Feb 13, 17, 18, 19, 20, Mar 8, Mar 10–11) are renamed/dropped per rule
+- any other ID ≥ 20 is set aside as `overflow` (v1.0 mapped it with `% 20`, which silently added pig 20's frames to pig 0, pig 21's to pig 1, …)
+- a second capture of the same stall in the same folder is set aside as `duplicate`
+- everything set aside goes to `predictions_excluded.csv`; folders that need a human look are flagged in `data_quality.csv`
+
+If you find a new bad range: add one rule to `CORRECTIONS` in `posture/id_corrections.py` and re-run inference (or `regenerate_heatmap.py` / `count_posture_changes.py`, which apply the same policy to older CSVs). `fix_pig_ids.py` (renames raw files) is dry-run by default and should only ever be used on a copy of the data. `fix_predictions_csv.py` is only for CSVs made before v1.1.
+
+Still open: a stall that is *skipped* (19 captures) shifts every later ID by one. `data_quality.csv` lists those folders (`missing_stalls`), but deciding which physical stall was skipped still needs image comparison.
 
 ### Re-generating the heatmap without re-running inference (30 min saved)
 
@@ -98,13 +107,27 @@ python posture/regenerate_heatmap.py
 
 Reads `outputs/predictions.csv` and rebuilds heatmaps. Use this after editing pig IDs or tweaking colors.
 
+### Scoring against Lucas's time-stamped posture ground truth (independent test)
+
+Lucas's `sow position.xlsx` (his Apr 16 email; Teams → Ground Truth) labels all 20 stalls on every robot pass from Feb 6 to Feb 15 (codes 0 = lying, 1 = sitting, 2 = standing, X = empty stall; 35,816 labels). The OAK frames for those days are on the RDE share (`\\umad.umsystem.edu\rde\zhoujianf-lab\Pig project\Sow Data\Pictures_OAK`, flat timestamp folders) and on the lab PC under `E:\Pig_data\Pictures_OAK\OAK_0206_0211` / `OAK_0211_0312`:
+
+```bash
+python posture/run_inference.py "<share>\Pictures_OAK" --start 20260206 --end 20260211 --output-dir outputs/gt_feb06
+python posture/eval_ground_truth.py --gt "sow position.xlsx" --pred outputs/gt_feb06/predictions.csv --out outputs/gt_feb06/ground_truth_eval.csv
+python posture/review_presence.py --misses outputs/gt_feb06/ground_truth_misses.csv
+```
+
+Results on Feb 6–11 are in CHANGELOG.md (v1.1 → Validation). Lucas's row time is the start of the robot pass (one time per row for all 20 stalls); the robot passes every 10.65 min and he logs about two rows per pass, so the script scores the closest row per pass and stall.
+
+`run_inference.py` also writes `posture_matrix.csv` (rows = timestamp folders, columns = pig0…pig19), the format Fengkai asked for to test the model himself.
+
 ### Comparing posture against Lucas's estrus ground truth
 
 ```bash
 python posture/count_posture_changes.py --estrus path/to/estrus.xlsx
 ```
 
-Counts nighttime (19:00–08:00) posture transitions per pig per night. Cross-references with Lucas's heat-day labels. Validated biological signal: pig 9 = +12.8 transitions on heat days, pig 14 = +10.1.
+Counts nighttime (19:00–08:00) posture transitions per pig per night. Cross-references with Lucas's heat-day labels. v1.0 signal: pig 9 = +12.8 transitions on heat days, pig 14 = +10.1 — re-check these with v1.1, because v1.0 counted overflow captures merged into pigs 0–3 as extra transitions. Options: `--use-smoothed`, `--min-confidence 0.7`, `--id-policy modulo` (reproduce v1.0).
 
 ### Master Excel report
 
@@ -124,14 +147,20 @@ The notebook `PAAL_Posture_Classification.ipynb` is self-contained — every fun
 
 All code cells are auto-collapsed (Colab form mode) so non-CS users see only titles + the path input.
 
-### Re-training the posture model
+### Re-training / benchmarking the posture model
 
-Only needed if labeled data changes substantially.
+Labeled frames: `labels/labels_posture3.csv` (1,372 frames, Jan 23 – Feb 3; standing 656 / sitting 52 / lying 664; 24 of the 52 sitting frames are pig 4). Its image paths are from the Mac, so point `--data-root` at any folder that contains those timestamp folders — files are found by name.
 
 ```bash
-python posture/train.py --modality ir --class-set posture3
-python posture/eval.py
+# Before/after comparison (shipped model, v1.0 recipe vs v1.1 recipe, grouped 5-fold CV by pig)
+python posture/benchmark.py --data-root "C:\PAAL_data\Fed_pig\Pictures_OAK"
+
+# Train one model on the fixed split (train 0–11 / val 12–15 / test 16–19)
+python posture/train.py --class-set posture3 --modality ir --recipe improved --data-root <folder>
+python posture/eval.py --model-prefix posture3 --class-set posture3 --num-classes 3 --data-root <folder>
 ```
+
+The fixed test split has only ~190 frames and 5 sitting frames, so compare recipes with `--cv 5` (every pig tested once) rather than the single split. New checkpoints record their preprocessing (`normalize`, `crop`) and inference reads it, so v1.0 and v1.1 models both work everywhere, including the Colab notebook (MobileNetV2 checkpoints only).
 
 ### Re-training the pig-presence detector
 
@@ -208,6 +237,8 @@ In `papers/`:
 - **Lab Windows PC:** `C:\PAAL_data\Fed_pig\Pictures_OAK\` and `C:\PAAL_data\Fed_pig\Pictures_RS\`
 - **Google Drive:** shared folder with sample data
 - **OneDrive:** processed outputs uploaded as `PAAL Pipeline Outputs (<date range>)`
+- **RDE share:** `\\umad.umsystem.edu\rde\zhoujianf-lab\Pig project\Sow Data\Pictures_OAK` (flat timestamp folders; 5,223 folders in Oct 2026, Jan 23 – Jan 30 and Feb 6 onward; Jan 31 – Feb 3 is not there)
+- **Lab PC drives (CAFNR-8M42H04):** `E:\Pig_data\Pictures_OAK\OAK_<MMDD>_<MMDD>\` round folders (Jan 23 – Jun 11), `F:\Pig_barn_data\Pictures_OAK\` (Apr 9 onward). `C:\PAAL_data` does not exist on this PC.
 - **Shared lab drive `E:\Pig_data\`** structure: `Pictures_OAK/` + `Pictures_RS/`, each containing `YYYY-MM-DD_MM-DD/` collection-round folders with the timestamp subfolders inside
 
 ---
@@ -216,7 +247,8 @@ In `papers/`:
 
 | Issue | Workaround |
 |---|---|
-| Camera magnet glitch creates pig IDs > 19 | Use `fix_pig_ids.py` / `fix_predictions_csv.py`. Already covers Feb 13, Feb 17, Feb 18, Feb 19, Feb 20, Mar 8, Mar 10–11. |
+| Camera magnet glitch creates pig IDs > 19 | Handled in memory by `posture/id_corrections.py` (known rules for Feb 13, 17, 18, 19, 20, Mar 8, Mar 10–11; other overflow/duplicates set aside and reported in `data_quality.csv`). |
+| Mac disk nearly full / raw data only on lab PC | Run training, benchmark and full inference on the lab PC; the Mac only has the repo. |
 | Camera downtime Feb 16–17, Feb 20–22 | No frames exist for those dates. Pipeline handles cleanly (empty folders). |
 | Pig 18 / pig 19 empty stalls in Fed_Pig 2026 round | CNN pig-detector filters them automatically. |
 | `_cropped.jpg` files in legacy data | `posture/run_inference.py` detects and skips double-cropping. |
@@ -229,6 +261,7 @@ In `papers/`:
 
 ```bash
 pip install -r requirements.txt
+python tests/test_posture_pipeline.py   # 13 quick checks on synthetic data, ~20 s, no lab data needed
 ```
 
 Key deps: `torch`, `torchvision`, `opencv-python`, `numpy`, `pandas`, `openpyxl`, `matplotlib`, `tqdm`, `open3d` (vulva only), `python-pptx` (slides only).

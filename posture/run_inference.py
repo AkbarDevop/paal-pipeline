@@ -14,10 +14,10 @@ import csv
 import os
 import re
 import sys
-from collections import Counter
+import time
+from collections import Counter, defaultdict
 from datetime import datetime
 
-import cv2
 import numpy as np
 import torch
 
@@ -33,9 +33,14 @@ except ImportError:
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+from torch.utils.data import DataLoader, Dataset
+
 from config import CROP_TOF, MODEL_DIR, OUTPUT_DIR, POSTURE3_CLASSES, IMG_SIZE
 from models import SingleModalModel
-from data_loader import MODALITY_CHANNELS, load_and_preprocess
+from preprocess import (ckpt_preprocessing, crop_stall, load_model_input, normalize_batch,
+                        pick_device, read_image, resize_rgb_uint8)
+from id_corrections import assign_ids, dedupe, folder_quality
+from temporal import smooth_results
 
 # ── Constants ─────────────────────────────────────────────────────────────
 
@@ -50,40 +55,16 @@ FILENAME_RE = re.compile(
 FOLDER_RE = re.compile(r"^\d{8}-\d{2}-\d{2}-\d{2}$")
 
 
-# ── Step 1: Crop images ──────────────────────────────────────────────────
-
-def crop_box_for_size(w, h):
-    x1, y1, x2, y2 = CROP_TOF
-    sx, sy = w / TOF_W, h / TOF_H
-    return int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
-
+# ── Step 1: Scan + load (crop happens in memory, raw folders are read-only) ──
 
 def load_and_crop_ir(ir_path, size=IMG_SIZE):
-    """Load IR jpg, crop to stall region if not already cropped, resize for model.
+    """Kept for backward compatibility (Colab / older scripts).
 
-    If the filename ends with `_cropped.jpg` (legacy preprocessed data), the
-    image is already cropped — just resize. Otherwise crop the raw stall ROI
-    in-memory, then resize.
+    Returns an HWC float32 array in 0..1, exactly like v1.0.
     """
-    if not ir_path or not os.path.exists(ir_path):
-        return None
-    if os.path.getsize(ir_path) < 1000:
-        return None
-    img = cv2.imread(ir_path)
-    if img is None:
-        return None
-    h, w = img.shape[:2]
-    if h < 10 or w < 10:
-        return None
-    if "_cropped" not in ir_path:
-        x1, y1, x2, y2 = crop_box_for_size(w, h)
-        img = img[y1:y2, x1:x2]
-    img = cv2.resize(img, (size, size))
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    return img
+    t = load_model_input(ir_path, size=size, crop=True, normalize=None)
+    return None if t is None else t.permute(1, 2, 0).numpy()
 
-
-# ── Step 2: Scan + prefilter + predict ────────────────────────────────────
 
 def load_depth_raw(path):
     if not path or not os.path.exists(path):
@@ -102,6 +83,7 @@ def load_depth_raw(path):
 
 
 def check_pig_present(depth_raw_path):
+    """Median-depth prefilter. Missing/unreadable depth -> assume present."""
     depth = load_depth_raw(depth_raw_path)
     if depth is None:
         return True, 0.0
@@ -116,11 +98,17 @@ def check_pig_present(depth_raw_path):
     return median < DEPTH_THRESHOLD, median
 
 
-def scan_folder(data_dir):
+def scan_folder(data_dir, start=None, end=None):
+    """start/end: optional inclusive bounds on the timestamp folder name
+    (YYYYMMDD-HH-MM-SS sorts as text, so a date prefix like 20260317 works too)."""
     folders = sorted(
         d for d in os.listdir(data_dir)
         if os.path.isdir(os.path.join(data_dir, d)) and FOLDER_RE.match(d)
     )
+    if start:
+        folders = [d for d in folders if d >= start]
+    if end:
+        folders = [d for d in folders if d[:len(end)] <= end]
     if not folders:
         return []
 
@@ -155,14 +143,15 @@ def scan_folder(data_dir):
             col_name = f"{mod_key}{'_cropped' if is_cropped else ''}_{ext}"
             records[key][col_name] = os.path.join(folder_path, fname)
 
-    return sorted(records.values(), key=lambda r: (r["timestamp_folder"], r["pig_id"]))
+    return sorted(records.values(), key=lambda r: (r["timestamp_folder"], r["pig_id"], r["pig_timestamp"]))
 
 
 def get_image_path(frame):
-    """Get uncropped IR path (cropping now happens in-memory)."""
-    p = frame.get("ir_jpg", "")
-    if p and os.path.exists(p):
-        return p
+    """Uncropped IR path, falling back to a legacy _cropped file."""
+    for key in ("ir_jpg", "ir_cropped_jpg"):
+        p = frame.get(key, "")
+        if p and os.path.exists(p):
+            return p
     return ""
 
 
@@ -177,93 +166,221 @@ def load_pig_detector(model_dir, device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     detector.load_state_dict(ckpt["model_state_dict"])
     detector.eval().to(device)
+    detector.normalize = ckpt.get("normalize", None)
     return detector
 
 
-def run_predictions(data_dir, device, model, detector=None):
-    frames = scan_folder(data_dir)
+# status codes returned by FrameDataset
+ST_OK, ST_EMPTY_DEPTH, ST_CORRUPT = 0, 1, 2
+
+
+class FrameDataset(Dataset):
+    """Loads one capture: depth prefilter + IR as uint8 CHW.
+
+    Returns the stall-cropped image (what the pig detector was trained on) and
+    the image for the posture model (cropped unless its checkpoint says
+    crop=False). Lives at module level so DataLoader workers can pickle it on
+    Windows.
+    """
+
+    def __init__(self, frames, size=IMG_SIZE, crop_for_model=True):
+        self.frames = frames
+        self.size = size
+        self.crop_for_model = crop_for_model
+
+    def __len__(self):
+        return len(self.frames)
+
+    def __getitem__(self, idx):
+        frame = self.frames[idx]
+        empty = torch.zeros((3, self.size, self.size), dtype=torch.uint8)
+        present, median_d = check_pig_present(frame.get("depth_raw", ""))
+        if not present:
+            return idx, empty, empty, ST_EMPTY_DEPTH, median_d
+        path = get_image_path(frame)
+        img = read_image(path)
+        if img is None:
+            return idx, empty, empty, ST_CORRUPT, median_d
+
+        def to_t(a):
+            return torch.from_numpy(np.ascontiguousarray(a.transpose(2, 0, 1)))
+
+        cropped = to_t(resize_rgb_uint8(crop_stall(img, path), self.size))
+        model_img = cropped if self.crop_for_model else to_t(resize_rgb_uint8(img, self.size))
+        return idx, cropped, model_img, ST_OK, median_d
+
+
+def run_predictions(data_dir, device, model, detector=None, batch_size=64, workers=4,
+                    posture_normalize=None, frames=None, posture_crop=True):
+    """Batched inference. Returns (results, stats).
+
+    Same decisions as v1.0 (depth prefilter -> CNN detector p>=0.5 -> posture),
+    just batched and with full class probabilities kept.
+    """
+    if frames is None:
+        frames = scan_folder(data_dir)
     if not frames:
         print("No frames found.")
-        return []
+        return [], {}
 
-    print(f"[1/2] Running inference on {len(frames)} frames...")
+    print(f"[1/2] Running inference on {len(frames)} frames "
+          f"(batch {batch_size}, {workers} loader workers, {device})...")
     if detector is None:
         print("  (pig presence: depth prefilter only — detector model not loaded)")
     else:
         print("  (pig presence: depth prefilter + CNN detector)")
 
+    loader = DataLoader(FrameDataset(frames, crop_for_model=posture_crop), batch_size=batch_size, shuffle=False,
+                        num_workers=workers, persistent_workers=False)
+    class_ids = sorted(POSTURE3_CLASSES)
     results = []
-    skipped_depth = 0
-    skipped_detector = 0
-    skipped_corrupt = 0
+    stats = {"scanned": len(frames), "empty_depth": 0, "empty_detector": 0, "corrupt": 0}
+    skipped = []          # one row per frame that never reached the posture model
 
-    with torch.no_grad():
-        for i, frame in enumerate(frames):
-            # Step 1: Depth prefilter (cheap, rejects obvious empty stalls)
-            depth_raw = frame.get("depth_raw", "")
-            present, median_d = check_pig_present(depth_raw)
-            if not present:
-                skipped_depth += 1
+    def skip_row(i, reason, median, prob=""):
+        frame = frames[int(i)]
+        return {"timestamp_folder": frame["timestamp_folder"], "pig_id": frame["pig_id"],
+                "pig_timestamp": frame["pig_timestamp"], "reason": reason,
+                "median_depth": round(float(median), 1), "pig_present_prob": prob,
+                "image_path": get_image_path(frame)}
+    done = 0
+    t0 = time.time()
+
+    with torch.inference_mode():
+        for idxs, imgs, model_imgs, status, medians in loader:
+            done += len(idxs)
+            stats["empty_depth"] += int((status == ST_EMPTY_DEPTH).sum())
+            stats["corrupt"] += int((status == ST_CORRUPT).sum())
+            for k in (status != ST_OK).nonzero(as_tuple=True)[0].tolist():
+                skipped.append(skip_row(idxs[k], "depth" if int(status[k]) == ST_EMPTY_DEPTH else "corrupt",
+                                        medians[k]))
+            keep = (status == ST_OK).nonzero(as_tuple=True)[0]
+            if len(keep) == 0:
                 continue
+            x = imgs[keep].to(device).float().div_(255.0)
+            xm = x if posture_crop else model_imgs[keep].to(device).float().div_(255.0)
 
-            # Step 2: Load + crop IR image
-            path = get_image_path(frame)
-            if not path:
-                skipped_corrupt += 1
-                continue
-            img = load_and_crop_ir(path)
-            if img is None:
-                skipped_corrupt += 1
-                continue
-
-            x = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(device)
-
-            # Step 3: CNN pig-presence detector (catches what depth prefilter misses)
+            present_prob = torch.ones(len(keep))
             if detector is not None:
-                det_logits = detector(x)
-                det_probs = torch.softmax(det_logits, dim=1).cpu().numpy()[0]
-                # class 0 = empty, class 1 = present
-                if det_probs[1] < 0.5:
-                    skipped_detector += 1
+                det = torch.softmax(detector(normalize_batch(x, detector.normalize)), dim=1)[:, 1].cpu()
+                present_prob = det
+                ok = det >= 0.5
+                stats["empty_detector"] += int((~ok).sum())
+                for j in (~ok).nonzero(as_tuple=True)[0].tolist():
+                    k = int(keep[j])
+                    skipped.append(skip_row(idxs[k], "detector", medians[k], round(float(det[j]), 4)))
+                keep, xm, present_prob = keep[ok], xm[ok.to(xm.device)], det[ok]
+                if len(keep) == 0:
                     continue
 
-            # Step 4: Posture classification
-            logits = model(x)
-            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
-            pred = int(np.argmax(probs))
-            conf = float(probs[pred])
+            probs = torch.softmax(model(normalize_batch(xm, posture_normalize)), dim=1).cpu().numpy()
+            for j, k in enumerate(keep.tolist()):
+                frame = frames[int(idxs[k])]
+                pred = int(np.argmax(probs[j]))
+                row = {
+                    "timestamp_folder": frame["timestamp_folder"],
+                    "pig_id": frame["pig_id"],
+                    "pig_timestamp": frame["pig_timestamp"],
+                    "prediction": pred,
+                    "prediction_name": POSTURE3_CLASSES.get(pred, str(pred)),
+                    "confidence": round(float(probs[j][pred]), 4),
+                    "median_depth": round(float(medians[k]), 1),
+                    "image_path": get_image_path(frame),
+                    "pig_present_prob": round(float(present_prob[j]), 4),
+                }
+                for c in class_ids:
+                    row[f"prob_{POSTURE3_CLASSES[c]}"] = round(float(probs[j][c]), 4)
+                results.append(row)
 
-            results.append({
-                "timestamp_folder": frame["timestamp_folder"],
-                "pig_id": frame["pig_id"],
-                "pig_timestamp": frame["pig_timestamp"],
-                "prediction": pred,
-                "prediction_name": POSTURE3_CLASSES.get(pred, str(pred)),
-                "confidence": round(conf, 4),
-                "median_depth": round(median_d, 1),
-                "image_path": path,
-            })
+            if done % (batch_size * 20) < batch_size:
+                rate = done / max(time.time() - t0, 1e-6)
+                print(f"  {done}/{len(frames)} frames ({rate:.0f} frames/s)")
 
-            if (i + 1) % 500 == 0:
-                print(f"  {i + 1}/{len(frames)} frames...")
-
+    results.sort(key=lambda r: (r["timestamp_folder"], r["pig_id"], r["pig_timestamp"]))
     print(f"  Predicted: {len(results)}, "
-          f"Skipped (depth prefilter): {skipped_depth}, "
-          f"Skipped (CNN detector): {skipped_detector}, "
-          f"Skipped (corrupt/missing): {skipped_corrupt}")
+          f"Skipped (depth prefilter): {stats['empty_depth']}, "
+          f"Skipped (CNN detector): {stats['empty_detector']}, "
+          f"Skipped (corrupt/missing): {stats['corrupt']} "
+          f"[{time.time() - t0:.0f}s]")
+    skipped.sort(key=lambda r: (r["timestamp_folder"], r["pig_id"], r["pig_timestamp"]))
+    stats["skipped"] = skipped
+    return results, stats
+
+
+# ── Step 2b: ID policy + per-pig sequence columns ──────────────────────────
+
+def add_change_column(results, key="prediction_name", out_key="posture_changed", max_gap_minutes=30):
+    """1 if the posture differs from the same pig's previous kept frame (within max_gap)."""
+    by_pig = defaultdict(list)
+    for r in results:
+        by_pig[r["pig_id"]].append(r)
+    for rows in by_pig.values():
+        rows.sort(key=lambda r: r["pig_timestamp"])
+        prev = None
+        for r in rows:
+            t = parse_timestamp(r["pig_timestamp"])
+            changed = 0
+            if prev is not None and t is not None and prev[1] is not None:
+                gap = (t - prev[1]).total_seconds() / 60.0
+                if gap <= max_gap_minutes and r[key] != prev[0]:
+                    changed = 1
+            r[out_key] = changed
+            prev = (r[key], t)
     return results
+
+
+def save_rows(rows, out_path, fields):
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_coverage(results, out_path, num_stalls=20):
+    """Kept frames per stall per calendar day — shows days a stall has no data."""
+    counts = defaultdict(lambda: defaultdict(int))
+    days = set()
+    for r in results:
+        day = r["pig_timestamp"][:8]
+        days.add(day)
+        counts[r["pig_id"]][day] += 1
+    days = sorted(days)
+    with open(out_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["pig_id"] + days)
+        for pid in range(num_stalls):
+            w.writerow([pid] + [counts[pid].get(d, 0) for d in days])
+
+
+def save_posture_matrix(results, out_path, num_stalls=20, key="prediction_name"):
+    """Wide table Fengkai asked for: one row per timestamp folder, columns pig0..pig19."""
+    grid = defaultdict(dict)
+    for r in results:
+        grid[r["timestamp_folder"]][r["pig_id"]] = r[key]
+    with open(out_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["timestamp_folder", "datetime"] + [f"pig{i}" for i in range(num_stalls)])
+        for folder in sorted(grid):
+            t = parse_timestamp(folder)
+            w.writerow([folder, t.strftime("%Y-%m-%d %H:%M:%S") if t else ""]
+                       + [grid[folder].get(i, "") for i in range(num_stalls)])
+
+
+PRED_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp",
+               "prediction", "prediction_name", "confidence",
+               "median_depth", "image_path",
+               "pig_id_raw", "id_status", "pig_present_prob",
+               "prob_standing", "prob_sitting", "prob_lying",
+               "posture_changed"]
+SMOOTH_FIELDS = ["smoothed_prediction_name", "posture_changed_smoothed"]
+SKIP_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "reason", "median_depth", "pig_present_prob",
+               "pig_id_raw", "id_status", "include", "image_path"]
 
 
 # ── Step 3: Generate outputs ──────────────────────────────────────────────
 
 def save_csv(results, out_path):
-    fields = ["timestamp_folder", "pig_id", "pig_timestamp",
-              "prediction", "prediction_name", "confidence",
-              "median_depth", "image_path"]
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(results)
+    save_rows(results, out_path, PRED_FIELDS)
 
 
 def parse_timestamp(ts_str):
@@ -285,10 +402,7 @@ def generate_heatmap(results, out_path):
         print("  matplotlib not installed, skipping heatmap")
         return
 
-    # Normalize pig IDs (camera overflow: 20→0, 21→1, etc.)
-    for r in results:
-        r["pig_id"] = normalize_pig_id(r["pig_id"])
-
+    # IDs are already corrected by id_corrections.assign_ids (no blind % 20)
     # Fixed Y-axis: always pig 0–19 regardless of which pigs have data
     pig_ids = list(range(20))
     timestamps = [parse_timestamp(r["pig_timestamp"]) for r in results]
@@ -557,18 +671,12 @@ def generate_per_pig_csvs(results, out_dir):
     pig_dir = os.path.join(out_dir, "per_pig")
     os.makedirs(pig_dir, exist_ok=True)
 
-    fields = ["timestamp_folder", "pig_id", "pig_timestamp",
-              "prediction", "prediction_name", "confidence",
-              "median_depth", "image_path"]
-
     pig_ids = sorted(set(r["pig_id"] for r in results))
     for pid in pig_ids:
-        pig_results = [r for r in results if r["pig_id"] == pid]
+        pig_results = sorted((r for r in results if r["pig_id"] == pid),
+                             key=lambda r: r["pig_timestamp"])
         csv_path = os.path.join(pig_dir, f"pig{pid}_predictions.csv")
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(pig_results)
+        save_rows(pig_results, csv_path, PRED_FIELDS)
 
     print(f"  Per-pig CSVs: {pig_dir}/ ({len(pig_ids)} pigs)")
 
@@ -807,6 +915,9 @@ def generate_timestamp_summary(results, out_path):
 def print_summary(results):
     counts = Counter(r["prediction_name"] for r in results)
     total = len(results)
+    if total == 0:
+        print("\n  No frames left after filtering (see predictions_excluded.csv / data_quality.csv)")
+        return
     print(f"\n{'='*50}")
     print(f"  Total predicted: {total}")
     for name in ["standing", "sitting", "lying"]:
@@ -818,38 +929,7 @@ def print_summary(results):
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="One-command posture inference: input path → CSV + heatmap"
-    )
-    parser.add_argument("data_dir", help="Path to OAK-D data folder")
-    parser.add_argument("--output-dir", default=None,
-                        help="Output directory (default: outputs/)")
-    args = parser.parse_args()
-
-    data_dir = args.data_dir
-    out_dir = args.output_dir or OUTPUT_DIR
-
-    if not os.path.isdir(data_dir):
-        print(f"Error: {data_dir} is not a directory")
-        sys.exit(1)
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Device
-    device = torch.device(
-        "mps" if torch.backends.mps.is_available()
-        else "cuda" if torch.cuda.is_available()
-        else "cpu"
-    )
-    print(f"Device: {device}")
-
-    # Load model
-    model_path = os.path.join(MODEL_DIR, "posture3_ir_best.pth")
-    if not os.path.exists(model_path):
-        print(f"Error: model not found at {model_path}")
-        sys.exit(1)
-
+def load_posture_model(model_path, device):
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
     backbone = ckpt.get("backbone", "mobilenet_v2")
     model = SingleModalModel(
@@ -860,49 +940,171 @@ def main():
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    print(f"Posture model: {backbone}, {ckpt.get('num_classes', 3)} classes")
+    normalize, crop = ckpt_preprocessing(ckpt)
+    model.posture_crop = crop
+    return model, ckpt, normalize
 
-    # Load pig presence detector (binary CNN)
-    detector = load_pig_detector(MODEL_DIR, device)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="One-command posture inference: input path → CSV + heatmap"
+    )
+    parser.add_argument("data_dir", help="Path to OAK-D data folder")
+    parser.add_argument("--output-dir", default=None,
+                        help="Output directory (default: outputs/)")
+    parser.add_argument("--model", default=os.path.join(MODEL_DIR, "posture3_ir_best.pth"),
+                        help="Posture checkpoint (default: models/posture3_ir_best.pth)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Frames per forward pass (default: 64 on GPU/MPS, 4 on CPU — "
+                             "large batches are slower on CPU for MobileNetV2)")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Image loader worker processes (default 0 on macOS/Windows, where spawning "
+                             "workers made a 1k-frame run 3x slower; up to 4 on Linux)")
+    parser.add_argument("--id-policy", choices=["strict", "modulo"], default="strict",
+                        help="strict (default): apply known corrections, drop overflow IDs and "
+                             "duplicate captures; modulo: v1.0 behaviour (pid %% 20)")
+    parser.add_argument("--smooth", type=int, default=0,
+                        help="Add smoothed_prediction_name using a centered majority vote over "
+                             "N frames per pig (0/1 = off, 3 recommended)")
+    parser.add_argument("--use-smoothed", action="store_true",
+                        help="Use the smoothed posture for heatmaps/Excel instead of the raw one")
+    parser.add_argument("--max-gap", type=float, default=30.0,
+                        help="Max minutes between frames to treat them as consecutive")
+    parser.add_argument("--no-detector", action="store_true",
+                        help="Skip the CNN pig-presence detector (depth prefilter only)")
+    parser.add_argument("--start", default=None,
+                        help="Earliest timestamp folder to include, e.g. 20260317-00-06-44 or 20260317")
+    parser.add_argument("--end", default=None,
+                        help="Latest timestamp folder to include, e.g. 20260327-08-13-46 or 20260327 (whole day)")
+    args = parser.parse_args()
+
+    data_dir = args.data_dir
+    out_dir = args.output_dir or OUTPUT_DIR
+
+    if not os.path.isdir(data_dir):
+        print(f"Error: {data_dir} is not a directory")
+        sys.exit(1)
+
+    os.makedirs(out_dir, exist_ok=True)
+    device = pick_device()
+    if args.batch_size is None:
+        args.batch_size = 4 if device.type == "cpu" else 64
+    if args.workers is None:
+        args.workers = max(0, min(4, (os.cpu_count() or 1) - 1)) if sys.platform.startswith("linux") else 0
+    print(f"Device: {device}")
+
+    if not os.path.exists(args.model):
+        print(f"Error: model not found at {args.model}")
+        sys.exit(1)
+    model, ckpt, posture_norm = load_posture_model(args.model, device)
+    print(f"Posture model: {os.path.basename(args.model)} "
+          f"({ckpt.get('backbone', 'mobilenet_v2')}, {ckpt.get('num_classes', 3)} classes, "
+          f"normalize={posture_norm})")
+
+    detector = None if args.no_detector else load_pig_detector(MODEL_DIR, device)
     if detector is not None:
         print("Pig detector: MobileNetV2 (binary, present/empty)")
     else:
-        print("Pig detector: NOT FOUND — falling back to depth prefilter only")
+        print("Pig detector: not used — depth prefilter only")
     print()
 
-    # Step 1: Predict (cropping happens in-memory, no disk writes)
-    results = run_predictions(data_dir, device, model, detector=detector)
+    # Step 1: scan + ID policy on every capture
+    if args.start or args.end:
+        print(f"Date filter: start={args.start or '-'} end={args.end or '-'}")
+    frames = scan_folder(data_dir, start=args.start, end=args.end)
+    if not frames:
+        print("No frames found.")
+        return
+    csv_path = os.path.join(out_dir, "predictions.csv")
+    excluded_path = os.path.join(out_dir, "predictions_excluded.csv")
+    quality_path = os.path.join(out_dir, "data_quality.csv")
+    coverage_path = os.path.join(out_dir, "coverage_by_pig_day.csv")
+    matrix_path = os.path.join(out_dir, "posture_matrix.csv")
+    heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
+    heatmap_raw_path = os.path.join(out_dir, "posture_heatmap_raw_ids.png")
+    ts_summary_path = os.path.join(out_dir, "timestamp_summary.csv")
+    skipped_path = os.path.join(out_dir, "skipped_frames.csv")
+
+    # Quality report describes the raw captures (incl. double captures), written first
+    quality = folder_quality(assign_ids([dict(f) for f in frames], policy=args.id_policy))
+    save_rows(quality, quality_path, list(quality[0].keys()))
+    # For the outputs, duplicates are resolved later among captures that produced a
+    # prediction, so a corrupt/empty first capture does not hide a usable second one.
+    assign_ids(frames, policy=args.id_policy, dedupe_captures=False, verbose=True)
+    status_by_key = {(f["timestamp_folder"], f["pig_id_raw"], f["pig_timestamp"]): f for f in frames}
+
+    # Step 2: predict (cropping happens in memory, no disk writes)
+    raw_frames = [dict(f, pig_id=f["pig_id_raw"]) for f in frames]
+    results, stats = run_predictions(data_dir, device, model, detector=detector,
+                                     batch_size=args.batch_size, workers=args.workers,
+                                     posture_normalize=posture_norm, frames=raw_frames,
+                                     posture_crop=getattr(model, "posture_crop", True))
+    # Every frame that never reached the posture model (empty by depth, rejected by the
+    # detector, unreadable), with corrected IDs, so presence errors can be audited later.
+    skipped = stats.get("skipped", [])
+    for r in skipped:
+        f = status_by_key[(r["timestamp_folder"], r["pig_id"], r["pig_timestamp"])]
+        r.update(pig_id_raw=f["pig_id_raw"], id_status=f["id_status"], include=f["include"], pig_id=f["pig_id"])
+    save_rows(skipped, skipped_path, SKIP_FIELDS)
+    print(f"  Skipped frames listed in {skipped_path} ({Counter(r['reason'] for r in skipped)})")
     if not results:
         print("No predictions generated.")
         return
 
-    # Step 2: Save outputs
-    csv_path = os.path.join(out_dir, "predictions.csv")
-    heatmap_path = os.path.join(out_dir, "posture_heatmap.png")
-    heatmap_raw_path = os.path.join(out_dir, "posture_heatmap_raw_ids.png")
-    ts_summary_path = os.path.join(out_dir, "timestamp_summary.csv")
+    for r in results:
+        f = status_by_key[(r["timestamp_folder"], r["pig_id"], r["pig_timestamp"])]
+        r["pig_id_raw"] = f["pig_id_raw"]
+        r["id_status"] = f["id_status"]
+        r["include"] = f["include"]
+        r["pig_id"] = f["pig_id"]
+    dedupe(results)
 
-    # Save CSV with raw (unnormalized) pig IDs
-    save_csv(results, csv_path)
+    kept = [r for r in results if r["include"]]
+    excluded = [r for r in results if not r["include"]]
+    add_change_column(kept, max_gap_minutes=args.max_gap)
+    if args.smooth > 1:
+        smooth_results(kept, window=args.smooth, max_gap_minutes=args.max_gap)
+        add_change_column(kept, key="smoothed_prediction_name",
+                          out_key="posture_changed_smoothed", max_gap_minutes=args.max_gap)
+
+    # Step 3: save outputs
+    fields = PRED_FIELDS + (SMOOTH_FIELDS if args.smooth > 1 else [])
+    save_rows(kept, csv_path, fields)
+    save_rows(excluded, excluded_path, fields)
+    save_coverage(kept, coverage_path)
+    save_posture_matrix(kept, matrix_path,
+                        key="smoothed_prediction_name" if (args.use_smoothed and args.smooth > 1) else "prediction_name")
+    if not kept:
+        print_summary(kept)
+        print(f"  Every prediction was set aside by the ID policy — see {excluded_path} and {quality_path}")
+        return
     print(f"\n[2/2] Generating outputs...")
 
-    # Generate heatmap with RAW pig IDs (including overflow 20+)
-    generate_heatmap_raw(results, heatmap_raw_path)
+    # Raw-ID heatmap shows every capture the camera produced (overflow visible)
+    generate_heatmap_raw([dict(r, pig_id=r["pig_id_raw"]) for r in results], heatmap_raw_path)
 
-    # Normalize pig IDs for the standard heatmap and per-pig outputs
-    for r in results:
-        r["pig_id"] = normalize_pig_id(r["pig_id"])
+    outputs = kept
+    if args.use_smoothed and args.smooth > 1:
+        outputs = [dict(r, prediction_name=r["smoothed_prediction_name"]) for r in kept]
 
-    generate_heatmap(results, heatmap_path)
-    generate_per_pig_heatmaps(results, out_dir)
-    generate_per_pig_csvs(results, out_dir)
-    generate_per_pig_excels(results, out_dir)
+    generate_heatmap(outputs, heatmap_path)
+    generate_per_pig_heatmaps(outputs, out_dir)
+    generate_per_pig_csvs(outputs, out_dir)
+    generate_per_pig_excels(outputs, out_dir)
     excel_path = os.path.join(out_dir, "posture_report.xlsx")
-    generate_excel_report(results, excel_path)
-    generate_timestamp_summary(results, ts_summary_path)
+    generate_excel_report(outputs, excel_path)
+    generate_timestamp_summary(outputs, ts_summary_path)
 
-    print_summary(results)
+    status_counts = Counter(r["id_status"] for r in results)
+    n_review = sum(q["needs_review"] for q in quality)
+    print_summary(outputs)
+    print(f"  ID policy: {args.id_policy} | predicted-frame status: {dict(status_counts)}")
+    print(f"  Folders needing review: {n_review}/{len(quality)} (see data_quality.csv)")
     print(f"\n  CSV:              {csv_path}")
+    print(f"  Excluded rows:    {excluded_path}")
+    print(f"  Data quality:     {quality_path}")
+    print(f"  Coverage:         {coverage_path}")
+    print(f"  Posture matrix:   {matrix_path}  (rows = folders, columns = pig0..pig19)")
     print(f"  Heatmap (all):    {heatmap_path}")
     print(f"  Heatmap (raw IDs):{heatmap_raw_path}")
     print(f"  Per-pig outputs:  {os.path.join(out_dir, 'per_pig')}/")

@@ -34,6 +34,8 @@ paal-pipeline/
 | Metric | Value |
 |---|---|
 | **Test Accuracy** | 98.4% (190 held-out frames from unseen pigs) |
+| **5-fold CV by pig** | 97.6% accuracy, 89.5% macro-F1 (Oct 2026, lab PC) |
+| **Independent test (Lucas, Feb 6–11)** | 91.3% accuracy (night 94.1%), nightly transitions per sow r = 0.84 |
 | **Best Model** | MobileNetV2 + IR modality (2.2M params) |
 | **Classes** | Standing, Sitting, Lying |
 | **Backbones Tested** | MobileNetV2, Xception, DenseNet121 |
@@ -89,14 +91,14 @@ This is the one-command monthly pipeline: crop → detect pig presence → class
 ### Re-training the models
 
 ```bash
-# Posture classifier (3 classes)
-python posture/train.py --modality ir --backbone mobilenet_v2 --num-classes 3 \
-  --labels-csv labels/labels_posture3.csv --model-prefix posture3 \
-  --use-cropped --class-weights
+# Before/after benchmark: shipped model + v1.0 vs v1.1 recipe, grouped 5-fold CV by pig
+python posture/benchmark.py --data-root /path/to/folder/with/labeled/timestamp/folders
 
-# Evaluate on held-out pigs 16–19
-python posture/eval.py --model-prefix posture3 --class-set posture3 --num-classes 3 \
-  --labels-csv labels/labels_posture3.csv --use-cropped
+# Posture classifier (3 classes) on the fixed split; --recipe baseline reproduces v1.0
+python posture/train.py --class-set posture3 --modality ir --recipe improved --data-root /path/to/data
+
+# Evaluate on held-out pigs 16–19 (uses the preprocessing stored in each checkpoint)
+python posture/eval.py --model-prefix posture3 --class-set posture3 --num-classes 3 --data-root /path/to/data
 
 # Pig-presence detector (binary)
 python posture/train_pig_detector.py
@@ -268,8 +270,9 @@ Pig-ID-based split to prevent data leakage:
 
 - Python 3.10+
 - PyTorch, torchvision
-- OpenCV, NumPy, scikit-learn, matplotlib
+- OpenCV, NumPy, scikit-learn, matplotlib, openpyxl
 - timm (for Xception backbone)
+- Quick self-check: `python tests/test_posture_pipeline.py`
 
 ## License
 

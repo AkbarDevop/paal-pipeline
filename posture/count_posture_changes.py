@@ -136,25 +136,52 @@ def night_date(dt):
     return dt.strftime("%Y%m%d")
 
 
-def load_predictions(csv_path):
-    """Load predictions and parse timestamps."""
-    rows = []
+def load_predictions(csv_path, posture_column="prediction_name", id_policy="strict", min_confidence=0.0):
+    """Load predictions and parse timestamps.
+
+    v1.1 CSVs (from run_inference.py) already contain one row per stall per
+    folder with corrected IDs. Older CSVs still have raw camera IDs, overflow
+    IDs (20+) and double captures; for those the same ID policy as inference
+    is applied here (id_policy="strict"), so pig 0 no longer picks up pig 20.
+    """
     with open(csv_path, encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            ts = row["pig_timestamp"]
-            try:
-                dt = datetime.strptime(ts, "%Y%m%d-%H-%M-%S")
-            except ValueError:
-                continue
-            rows.append({
-                "pig_id": int(row["pig_id"]),
-                "datetime": dt,
-                "date": dt.strftime("%Y%m%d"),
-                "night_date": night_date(dt),
-                "hour": dt.hour,
-                "posture": row["prediction_name"],
-                "confidence": float(row["confidence"]),
-            })
+        raw_rows = list(csv.DictReader(f))
+    if raw_rows and "id_status" not in raw_rows[0] and id_policy != "none":
+        from id_corrections import assign_ids
+        frames = [{"timestamp_folder": r["timestamp_folder"], "pig_id": int(r["pig_id"]),
+                   "pig_timestamp": r["pig_timestamp"], "_row": r} for r in raw_rows]
+        assign_ids(frames, policy=id_policy)
+        dropped = sum(1 for f in frames if not f["include"])
+        print(f"  legacy CSV: applied '{id_policy}' ID policy, dropped {dropped} overflow/duplicate rows")
+        raw_rows = []
+        for f in frames:
+            if f["include"]:
+                f["_row"]["pig_id"] = f["pig_id"]
+                raw_rows.append(f["_row"])
+    if raw_rows and (posture_column not in raw_rows[0]
+                     or not any((r.get(posture_column) or "").strip() for r in raw_rows)):
+        raise SystemExit(f"Column '{posture_column}' is missing or empty in {csv_path} "
+                         f"(run run_inference.py with --smooth 3 to get smoothed_prediction_name)")
+
+    rows = []
+    for row in raw_rows:
+        ts = row["pig_timestamp"]
+        try:
+            dt = datetime.strptime(ts, "%Y%m%d-%H-%M-%S")
+        except ValueError:
+            continue
+        conf = float(row.get("confidence") or 0.0)
+        if conf < min_confidence:
+            continue
+        rows.append({
+            "pig_id": int(row["pig_id"]),
+            "datetime": dt,
+            "date": dt.strftime("%Y%m%d"),
+            "night_date": night_date(dt),
+            "hour": dt.hour,
+            "posture": row[posture_column],
+            "confidence": conf,
+        })
     return rows
 
 
@@ -228,13 +255,22 @@ def main():
                         help="Only count nighttime hours (default: true)")
     parser.add_argument("--output", default=None,
                         help="Output CSV path")
+    parser.add_argument("--use-smoothed", action="store_true",
+                        help="Count transitions on smoothed_prediction_name (run_inference --smooth 3)")
+    parser.add_argument("--id-policy", choices=["strict", "modulo", "none"], default="strict",
+                        help="ID policy for legacy CSVs without id_status (default strict)")
+    parser.add_argument("--min-confidence", type=float, default=0.0,
+                        help="Ignore frames below this confidence (default 0 = keep all)")
+    parser.add_argument("--max-gap", type=float, default=30.0,
+                        help="Max minutes between frames counted as consecutive (default 30)")
     args = parser.parse_args()
 
     night_only = args.night_only.lower() == "true"
 
     # Load predictions
     print(f"Loading predictions from {args.csv}...")
-    predictions = load_predictions(args.csv)
+    posture_column = "smoothed_prediction_name" if args.use_smoothed else "prediction_name"
+    predictions = load_predictions(args.csv, posture_column, args.id_policy, args.min_confidence)
     print(f"  {len(predictions)} total frames")
 
     # Determine date range
@@ -250,23 +286,27 @@ def main():
             print(f"  Day 0 = {day0.strftime('%Y-%m-%d')}")
             print(f"  Monitoring window: Day 0-{args.days - 1} ({day0.strftime('%m/%d')} - {(day0 + timedelta(days=args.days - 1)).strftime('%m/%d')})")
 
+    # Window on the same key the counts are grouped by: with night_only a night
+    # runs 19:00 (day X-1) -> 08:00 (day X) and belongs to day X, so filtering on
+    # the calendar date used to cut the evening half off the first night.
+    win_key = "night_date" if night_only else "date"
     if day0:
         start_date = day0.strftime("%Y%m%d")
         end_date = (day0 + timedelta(days=args.days)).strftime("%Y%m%d")
-        predictions = [p for p in predictions if start_date <= p["date"] < end_date]
+        predictions = [p for p in predictions if start_date <= p[win_key] < end_date]
     else:
         # Use first N days of data
-        unique_dates = sorted(set(p["date"] for p in predictions))
+        unique_dates = sorted(set(p[win_key] for p in predictions))
         if len(unique_dates) > args.days:
             cutoff = unique_dates[args.days]
-            predictions = [p for p in predictions if p["date"] < cutoff]
+            predictions = [p for p in predictions if p[win_key] < cutoff]
 
-    dates_used = sorted(set(p["date"] for p in predictions))
+    dates_used = sorted(set(p[win_key] for p in predictions))
     time_label = "nighttime (19:00-08:00 next day)" if night_only else "all hours"
     print(f"  Analyzing {len(predictions)} frames across {len(dates_used)} days ({time_label})")
 
     # Count transitions
-    results = count_transitions(predictions, night_only=night_only)
+    results = count_transitions(predictions, night_only=night_only, max_gap_minutes=args.max_gap)
 
     # Output CSV
     out_path = args.output or os.path.join(OUTPUT_DIR, "posture_transitions.csv")
