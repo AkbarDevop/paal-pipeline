@@ -55,11 +55,11 @@ That single command does the whole pipeline:
 1. Scans every capture and cleans camera IDs (known magnet fixes from `posture/id_corrections.py`, overflow IDs 20+ and double captures set aside — no more `% 20`)
 2. Crops images to the stall region in memory (raw folders are never written to)
 3. Filters out empty stalls (depth prefilter + CNN pig-presence detector)
-4. Runs the posture classifier in batches (MobileNetV2 on IR, 98.4% on test pigs 16–19)
+4. Runs the posture classifier in batches (MobileNetV2 on IR: 98.4% on test pigs 16–19, 97.6% in 5-fold CV by pig, 91.3% against Lucas's independent labels for Feb 6–11, 94.1% at night)
 5. Writes `outputs/predictions.csv` (one row per stall per folder, with class probabilities and a `posture_changed` column), `predictions_excluded.csv`, `data_quality.csv` (folders with missing/extra/duplicate IDs) and `coverage_by_pig_day.csv`
 6. Generates heatmaps, per-pig Excel reports + master workbook with daily statistics
 
-Useful flags: `--smooth 3` adds `smoothed_prediction_name` (removes one-frame flips; validate with `posture/benchmark.py` before using it for transition counts), `--model PATH` to try another checkpoint, `--id-policy modulo` to reproduce v1.0 numbers, `--batch-size/--workers` for speed.
+Useful flags: `--start/--end` (folder date range, e.g. `--start 20260206 --end 20260211`), `--smooth 3` adds `smoothed_prediction_name` (do **not** use it for transition counts: against Lucas's labels it cut nightly transitions from 8.0 to 2.5 per sow), `--model PATH` to try another checkpoint, `--id-policy modulo` to reproduce v1.0 numbers, `--batch-size/--workers` for speed.
 
 ### Required model files
 
@@ -109,13 +109,15 @@ Reads `outputs/predictions.csv` and rebuilds heatmaps. Use this after editing pi
 
 ### Scoring against Lucas's time-stamped posture ground truth (independent test)
 
-Lucas's `sow position.xlsx` (Teams → Ground Truth) labels all 20 pigs every ~10 min on Feb 6–10 (codes 0 = lying, 1 = sitting, 2 = standing). The matching OAK frames are in `OAK_0206_0211` on the room-127 PC (Dr. Zhou found them Apr 19), so this is a test on days and labels the model never saw:
+Lucas's `sow position.xlsx` (his Apr 16 email; Teams → Ground Truth) labels all 20 stalls on every robot pass from Feb 6 to Feb 15 (codes 0 = lying, 1 = sitting, 2 = standing, X = empty stall; 35,816 labels). The OAK frames for those days are on the RDE share (`\\umad.umsystem.edu\rde\zhoujianf-lab\Pig project\Sow Data\Pictures_OAK`, flat timestamp folders) and on the lab PC under `E:\Pig_data\Pictures_OAK\OAK_0206_0211` / `OAK_0211_0312`:
 
 ```bash
-python posture/run_inference.py "<path>\OAK_0206_0211" --output-dir outputs/gt_feb06 --smooth 3
-python posture/eval_ground_truth.py --gt "sow position.xlsx" --pred outputs/gt_feb06/predictions.csv
-# if the sheet layout is different: add --inspect to see the first rows of every sheet
+python posture/run_inference.py "<share>\Pictures_OAK" --start 20260206 --end 20260211 --output-dir outputs/gt_feb06
+python posture/eval_ground_truth.py --gt "sow position.xlsx" --pred outputs/gt_feb06/predictions.csv --out outputs/gt_feb06/ground_truth_eval.csv
+python posture/review_presence.py --misses outputs/gt_feb06/ground_truth_misses.csv
 ```
+
+Results on Feb 6–11 are in CHANGELOG.md (v1.1 → Validation). Lucas's row time is the start of the robot pass (one time per row for all 20 stalls); the robot passes every 10.65 min and he logs about two rows per pass, so the script scores the closest row per pass and stall.
 
 `run_inference.py` also writes `posture_matrix.csv` (rows = timestamp folders, columns = pig0…pig19), the format Fengkai asked for to test the model himself.
 
@@ -235,6 +237,8 @@ In `papers/`:
 - **Lab Windows PC:** `C:\PAAL_data\Fed_pig\Pictures_OAK\` and `C:\PAAL_data\Fed_pig\Pictures_RS\`
 - **Google Drive:** shared folder with sample data
 - **OneDrive:** processed outputs uploaded as `PAAL Pipeline Outputs (<date range>)`
+- **RDE share:** `\\umad.umsystem.edu\rde\zhoujianf-lab\Pig project\Sow Data\Pictures_OAK` (flat timestamp folders; 5,223 folders in Oct 2026, Jan 23 – Jan 30 and Feb 6 onward; Jan 31 – Feb 3 is not there)
+- **Lab PC drives (CAFNR-8M42H04):** `E:\Pig_data\Pictures_OAK\OAK_<MMDD>_<MMDD>\` round folders (Jan 23 – Jun 11), `F:\Pig_barn_data\Pictures_OAK\` (Apr 9 onward). `C:\PAAL_data` does not exist on this PC.
 - **Shared lab drive `E:\Pig_data\`** structure: `Pictures_OAK/` + `Pictures_RS/`, each containing `YYYY-MM-DD_MM-DD/` collection-round folders with the timestamp subfolders inside
 
 ---

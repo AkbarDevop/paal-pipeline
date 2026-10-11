@@ -1,8 +1,25 @@
 # Changelog
 
-## v1.1 — posture module review (October 2026, branch `improve/posture-v1.1`)
+## v1.1 — posture module review (October 2026)
 
-Local branch. Not pushed until `posture/benchmark.py` has been run on the lab PC and the numbers confirm the new training recipe.
+Merged into `main` on 2026-10-10 after validation on the lab PC. The shipped model (`posture3_ir_best.pth`, v1.0 release) is unchanged; v1.1 changes the pipeline around it.
+
+### Validation (lab PC, 2026-10-10)
+
+- **Grouped 5-fold CV by pig** (`posture/benchmark.py`, 748 of the 1,372 labelled frames; Jan 31 – Feb 3 frames are not on the RDE share or the lab PC drives):
+
+  | Recipe | Accuracy | Macro-F1 | Balanced acc. | Sitting recall | Lying → sitting errors |
+  |---|---|---|---|---|---|
+  | baseline (v1.0) | 97.6% | 89.5% | 86.9% | 20/32 | 3 |
+  | improved | 97.5% | 91.4% | 95.3% | 29/32 | 13 |
+
+  The improved recipe is not adopted: it catches sitting but labels more lying sows as sitting.
+- **Independent test against Lucas's `sow position.xlsx`** (`posture/eval_ground_truth.py`, Feb 6–11, 12,745 pass × stall comparisons, shipped model):
+  - accuracy 91.3%, macro-F1 77.3%; night (19:00–08:00) 94.1%, day 86.9%
+  - recall / precision: standing 84.7 / 81.5%, sitting 50.5 / 56.9%, lying 95.2 / 95.5%
+  - nightly posture transitions per sow: truth 8.0, predicted 7.3, r = 0.84 (100 sow-nights). With `--smooth 3` only 2.5 (r = 0.68), so **leave smoothing off** for transition counts.
+  - presence: 99.9% of captured frames with a sow reached the posture model. The 5 depth-gate misses were all at 1,464–1,467 mm, just past the 1,463 mm cutoff.
+- Inference on the lab PC: 14,825 stall frames for Feb 6–11 in 20 min reading from the RDE share (2× RTX A6000).
 
 ### Bugs fixed
 

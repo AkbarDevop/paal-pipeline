@@ -34,6 +34,8 @@ paal-pipeline/
 | Metric | Value |
 |---|---|
 | **Test Accuracy** | 98.4% (190 held-out frames from unseen pigs) |
+| **5-fold CV by pig** | 97.6% accuracy, 89.5% macro-F1 (Oct 2026, lab PC) |
+| **Independent test (Lucas, Feb 6–11)** | 91.3% accuracy (night 94.1%), nightly transitions per sow r = 0.84 |
 | **Best Model** | MobileNetV2 + IR modality (2.2M params) |
 | **Classes** | Standing, Sitting, Lying |
 | **Backbones Tested** | MobileNetV2, Xception, DenseNet121 |
