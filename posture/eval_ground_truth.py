@@ -380,6 +380,15 @@ def main():
 
     gt = read_ground_truth(args.gt, parse_codes(args.codes), args.year, args.stall_offset, args.sheets)
     preds = read_predictions(args.pred)
+    span = [t for seq in preds.values() for t, _ in seq]
+    if span:
+        from datetime import timedelta as _td
+        lo, hi = min(span) - _td(minutes=args.tolerance), max(span) + _td(minutes=args.tolerance)
+        outside = sum(1 for g in gt if not lo <= g["time"] <= hi)
+        gt = [g for g in gt if lo <= g["time"] <= hi]
+        if outside:
+            print(f"  {outside} ground-truth cells fall outside the predicted period "
+                  f"({lo:%m-%d %H:%M} .. {hi:%m-%d %H:%M}) and are left out")
     has_smooth = any((r.get("smoothed_prediction_name") or "").strip()
                      for seq in preds.values() for _, r in seq)
 
