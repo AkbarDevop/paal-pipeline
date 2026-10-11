@@ -259,12 +259,15 @@ def read_ground_truth(path, codes, year, stall_offset=0, sheets=None, verbose=Tr
     return out
 
 
-def read_predictions(path):
+def read_predictions(path, time_key="timestamp_folder"):
+    """{pig: [(time, row)]}. time_key 'timestamp_folder' = start of the robot pass, which is
+    what Lucas's row time refers to (one time per row for all 20 stalls); 'pig_timestamp' =
+    the stall's own capture time, up to ~3 min later in the pass."""
     by_pig = defaultdict(list)
     with open(path, encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             try:
-                t = datetime.strptime(r["pig_timestamp"], "%Y%m%d-%H-%M-%S")
+                t = datetime.strptime(r[time_key], "%Y%m%d-%H-%M-%S")
             except ValueError:
                 continue
             by_pig[int(r["pig_id"])].append((t, r))
@@ -273,7 +276,7 @@ def read_predictions(path):
     return by_pig
 
 
-def read_frames(path, include_only=True):
+def read_frames(path, include_only=True, time_key="timestamp_folder"):
     """skipped_frames.csv / predictions_excluded.csv -> {pig_id: [(time, row), ...]}"""
     by_pig = defaultdict(list)
     if not path or not os.path.exists(path):
@@ -283,7 +286,7 @@ def read_frames(path, include_only=True):
             if include_only and str(r.get("include", "True")) not in ("True", "1", "true"):
                 continue
             try:
-                t = datetime.strptime(r["pig_timestamp"], "%Y%m%d-%H-%M-%S")
+                t = datetime.strptime(r[time_key], "%Y%m%d-%H-%M-%S")
                 by_pig[int(r["pig_id"])].append((t, r))
             except (ValueError, KeyError):
                 continue
@@ -293,6 +296,26 @@ def read_frames(path, include_only=True):
 
 
 MISS_REASONS = ["depth", "detector", "corrupt", "id_policy", "no_frame"]
+
+
+def pearson(x, y):
+    if len(x) < 3:
+        return float("nan")
+    mx, my = sum(x) / len(x), sum(y) / len(y)
+    sxy = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    sx = sum((a - mx) ** 2 for a in x) ** 0.5
+    sy = sum((b - my) ** 2 for b in y) ** 0.5
+    return sxy / (sx * sy) if sx and sy else float("nan")
+
+
+def class_line(tag, pairs):
+    m = metrics(pairs)
+    cm = m["confusion"]
+    rec = [cm[i][i] / max(1, sum(cm[i])) * 100 for i in range(3)]
+    pre = [cm[i][i] / max(1, sum(cm[j][i] for j in range(3))) * 100 for i in range(3)]
+    print(f"  {tag:<20} n={m['n']:6d}  accuracy {m['accuracy']*100:5.1f}%  macro-F1 {m['macro_f1']*100:5.1f}%  "
+          f"recall st/si/ly {rec[0]:4.1f}/{rec[1]:4.1f}/{rec[2]:4.1f}  precision {pre[0]:4.1f}/{pre[1]:4.1f}/{pre[2]:4.1f}")
+    return m
 
 
 def explain_misses(misses, skipped, excluded, tol):
@@ -361,6 +384,9 @@ def main():
     ap.add_argument("--sheets", nargs="*", default=None)
     ap.add_argument("--inspect", action="store_true", help="Print the first rows of each sheet and exit")
     ap.add_argument("--out", default=os.path.join(OUTPUT_DIR, "ground_truth_eval.csv"))
+    ap.add_argument("--match", choices=["pass", "capture"], default="pass",
+                    help="pass (default): match Lucas's row time to the start of the robot pass; "
+                         "capture: to each stall's own capture time")
     ap.add_argument("--skipped", default=None,
                     help="skipped_frames.csv from the same run (default: next to --pred)")
     ap.add_argument("--excluded", default=None,
@@ -379,7 +405,8 @@ def main():
         return
 
     gt = read_ground_truth(args.gt, parse_codes(args.codes), args.year, args.stall_offset, args.sheets)
-    preds = read_predictions(args.pred)
+    time_key = "timestamp_folder" if args.match == "pass" else "pig_timestamp"
+    preds = read_predictions(args.pred, time_key)
     span = [t for seq in preds.values() for t, _ in seq]
     if span:
         from datetime import timedelta as _td
@@ -392,64 +419,102 @@ def main():
     has_smooth = any((r.get("smoothed_prediction_name") or "").strip()
                      for seq in preds.values() for _, r in seq)
 
-    rows, raw_pairs, sm_pairs = [], [], []
-    per_pig = defaultdict(lambda: [0, 0])
-    unmatched = 0
-    misses = []
+    # Each GT row -> nearest pass within tolerance. Lucas logs ~2 rows per pass, so when two rows
+    # land on the same pass only the closest is scored (one comparison per pass and stall).
+    cand, misses = {}, []
     for g in gt:
-        p = nearest(preds.get(g["pig_id"], []), g["time"], args.tolerance)
-        if p is None:
-            unmatched += 1
+        seq = preds.get(g["pig_id"], [])
+        times = [t for t, _ in seq]
+        import bisect
+        i = bisect.bisect_left(times, g["time"])
+        best = None
+        for k in (i - 1, i):
+            if 0 <= k < len(seq):
+                d = abs((times[k] - g["time"]).total_seconds())
+                if d <= args.tolerance * 60 and (best is None or d < best[0]):
+                    best = (d, seq[k])
+        if best is None:
             misses.append(g)
             continue
+        key = (g["pig_id"], best[1][0])
+        if key not in cand or best[0] < cand[key][0]:
+            cand[key] = (best[0], g, best[1][1])
+
+    rows, raw_pairs, sm_pairs = [], [], []
+    per_pig = defaultdict(lambda: [0, 0])
+    for (pig, pass_t), (_, g, p) in sorted(cand.items(), key=lambda kv: (kv[0][1], kv[0][0])):
         raw = p["prediction_name"]
         sm = p.get("smoothed_prediction_name") or raw
         raw_pairs.append((g["label"], raw))
         sm_pairs.append((g["label"], sm))
-        per_pig[g["pig_id"]][0] += int(raw == g["label"])
-        per_pig[g["pig_id"]][1] += 1
-        rows.append({"time": g["time"].strftime("%Y-%m-%d %H:%M"), "pig_id": g["pig_id"], "ground_truth": g["label"],
-                     "prediction": raw, "smoothed": sm, "frame": p["pig_timestamp"],
-                     "confidence": p.get("confidence", "")})
+        per_pig[pig][0] += int(raw == g["label"])
+        per_pig[pig][1] += 1
+        rows.append({"time": g["time"].strftime("%Y-%m-%d %H:%M"), "pass": pass_t.strftime("%Y-%m-%d %H:%M:%S"),
+                     "pig_id": pig, "ground_truth": g["label"], "prediction": raw, "smoothed": sm,
+                     "frame": p["pig_timestamp"], "confidence": p.get("confidence", ""),
+                     "gt_sheet": g.get("sheet", ""), "gt_time_source": g.get("time_source", "")})
 
     with open(args.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]) if rows else ["time"])
         w.writeheader()
         w.writerows(rows)
 
-    print(f"\nGround-truth cells: {len(gt)} | matched to a frame within {args.tolerance:.0f} min: {len(rows)} "
-          f"| unmatched: {unmatched}")
-    for tag, pairs in (("raw", raw_pairs),) + ((("smoothed", sm_pairs),) if has_smooth else ()):
-        m = metrics(pairs)
-        print(f"  {tag:<9} accuracy {m['accuracy']*100:.2f}%  macro-F1 {m['macro_f1']*100:.2f}%  "
-              f"confusion (rows=true {NAMES}): {m['confusion']}")
+    print(f"\nGround-truth cells: {len(gt)} | scored (one per pass and stall, matched by "
+          f"{'pass start' if args.match == 'pass' else 'capture'} time within {args.tolerance:g} min): {len(rows)}")
+    class_line("raw", raw_pairs)
+    if has_smooth:
+        class_line("smoothed", sm_pairs)
+    night = lambda r: int(r["pass"][11:13]) >= 19 or int(r["pass"][11:13]) < 8
+    class_line("night 19:00-08:00", [(r["ground_truth"], r["prediction"]) for r in rows if night(r)])
+    class_line("day 08:00-19:00", [(r["ground_truth"], r["prediction"]) for r in rows if not night(r)])
+    print(f"  confusion (rows = true {NAMES}): {metrics(raw_pairs)['confusion']}")
     print("  per-pig accuracy: " + ", ".join(f"{p}:{c / n * 100:.0f}%" for p, (c, n) in sorted(per_pig.items())))
     if per_pig and min(c / n for c, n in per_pig.values()) < 0.6:
         print("  Note: a pig far below the others usually means a camera-ID / stall shift on those days, "
               "not a model error — check data_quality.csv for those folders.")
 
-    # transitions on the matched GT grid (same instants for truth and prediction)
-    by = defaultdict(list)
+    # nightly posture transitions per sow (the estrus signal), on the scored pass grid
+    seqs = defaultdict(list)
     for r in rows:
-        by[r["pig_id"]].append(r)
-    tr = {"ground_truth": 0, "prediction": 0, "smoothed": 0}
-    for seq in by.values():
-        seq.sort(key=lambda r: r["time"])
-        for a, b in zip(seq, seq[1:]):
-            gap = (datetime.strptime(b["time"], "%Y-%m-%d %H:%M") -
-                   datetime.strptime(a["time"], "%Y-%m-%d %H:%M")).total_seconds() / 60
-            if gap > 30:
+        if night(r):
+            t = datetime.strptime(r["pass"], "%Y-%m-%d %H:%M:%S")
+            seqs[(r["pig_id"], (t + timedelta(hours=5)).date())].append((t, r))
+    tt, tp, ts = [], [], []
+    for seq in seqs.values():
+        seq.sort(key=lambda x: x[0])
+        if len(seq) < 40:
+            continue
+        a = b = c = 0
+        for (t1, r1), (t2, r2) in zip(seq, seq[1:]):
+            if (t2 - t1).total_seconds() > 15 * 60:
                 continue
-            for k in tr:
-                tr[k] += int(a[k] != b[k])
-    print(f"  transitions on the GT grid: truth {tr['ground_truth']} | predicted {tr['prediction']}"
-          + (f" | smoothed {tr['smoothed']}" if has_smooth else ""))
+            a += r1["ground_truth"] != r2["ground_truth"]
+            b += r1["prediction"] != r2["prediction"]
+            c += r1["smoothed"] != r2["smoothed"]
+        tt.append(a); tp.append(b); ts.append(c)
+    if tt:
+        mae = lambda x: sum(abs(u - v) for u, v in zip(tt, x)) / len(tt)
+        print(f"\nNightly posture transitions per sow ({len(tt)} sow-nights with >= 40 scored passes):")
+        print(f"  truth {sum(tt)/len(tt):.1f}/night | predicted {sum(tp)/len(tp):.1f} "
+              f"(r = {pearson(tt, tp):.2f}, MAE {mae(tp):.1f})"
+              + (f" | smoothed {sum(ts)/len(ts):.1f} (r = {pearson(tt, ts):.2f}, MAE {mae(ts):.1f})" if has_smooth else ""))
     print(f"\nRow-level comparison: {args.out}")
 
     # ── presence check: every GT cell has a sow, so an unmatched cell is a miss ──
     pred_dir = os.path.dirname(os.path.abspath(args.pred))
-    skipped = read_frames(args.skipped or os.path.join(pred_dir, "skipped_frames.csv"))
-    excluded = read_frames(args.excluded or os.path.join(pred_dir, "predictions_excluded.csv"), include_only=False)
+    skipped = read_frames(args.skipped or os.path.join(pred_dir, "skipped_frames.csv"), time_key=time_key)
+    excluded = read_frames(args.excluded or os.path.join(pred_dir, "predictions_excluded.csv"), include_only=False,
+                           time_key=time_key)
+    # a GT row with no pass within tolerance just falls between two passes: not a miss
+    passes = sorted({t for d in (preds, skipped or {}, excluded or {}) for seq in d.values() for t, _ in seq})
+    import bisect
+
+    def has_pass(t):
+        i = bisect.bisect_left(passes, t)
+        return any(0 <= k < len(passes) and abs((passes[k] - t).total_seconds()) <= args.tolerance * 60
+                   for k in (i - 1, i))
+    between = [g for g in misses if not has_pass(g["time"])]
+    misses = [g for g in misses if has_pass(g["time"])]
     if skipped is None:
         print("\n  (no skipped_frames.csv next to --pred: re-run run_inference.py v1.1 to explain the misses)")
     explained = explain_misses(misses, skipped, excluded, args.tolerance)
@@ -465,7 +530,7 @@ def main():
     miss_by = defaultdict(lambda: defaultdict(int))
     for r in explained:
         miss_by[r["ground_truth"]][r["reason"]] += 1
-    print("\nPresence check (every ground-truth cell has a sow in the stall):")
+    print(f"\nPresence check (Lucas saw a sow; {len(between)} rows fall between passes and are not counted):")
     print(f"  {'posture':<9} {'cells':>6} {'predicted':>9}  " + "  ".join(f"{m:>9}" for m in MISS_REASONS)
           + "   kept / captured")
     for lab in NAMES:
