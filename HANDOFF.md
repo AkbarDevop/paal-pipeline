@@ -174,9 +174,58 @@ Uses auto-labeled IR frames (depth < 1463 mm = pig present, else empty stall). B
 
 ## Task B — Vulva Segmentation (IN PROGRESS)
 
-Status as of handoff: **paper-style surface pipeline operational, detection tuning in progress**.
+**v2 (October 2026): learned pipeline.** The posture model picks standing frames, a U-Net finds the vulva on the IR image, the matching ToF depth gives width, length, height and volume in mm, and each sow gets one robust value per day. The hand-crop surface tools below are kept for labelling and comparison.
 
-### Pipeline steps
+### Why it is built this way (data checked 2026-10-10)
+
+- **The estrus signal is real but small.** Lucas's caliper workbook (Teams > AI Imaging > Ground Truth > `Feb_2026.xlsx`, 20 sows, Feb 6–17) shows the W × L index rising a median 20% from each sow's day 1–2 baseline to her heat peak (more than 10% in 14 of 19 sows that came into heat). Width rose a median 9%, length 10%. Caliper day-to-day noise after heat: SD 2.6 mm (width), 4.5 mm (length).
+- **Single camera frames are too noisy.** Srikar's manual masks on Feb 11 (09:06–11:07, 12 passes, 48 measured frames) gave a within-morning SD of 8.7 mm (width) and 7.7 mm (length) for the same sow, and per-frame errors against the Feb 11 calipers of 9.9 mm (width) and 13.9 mm (length). One frame cannot see a 4–6 mm change, so the pipeline takes the median of many frames per sow-day.
+- **Most frames show no vulva.** In the 09:06 pass 15 of 20 sows were measurable; after 09:50 it was 0–3 per pass. Feeding time is the window; `--windows` restricts the run to it.
+
+### Pipeline (new)
+
+```bash
+# 0. Ground truth: Lucas's caliper + heat workbook -> tidy sow-day table and per-sow heat response
+python vulva/truth.py "path\to\Feb_2026.xlsx" --out outputs/vulva/sow_day_truth.csv
+
+# 1. Label index from the manual masks we have (measured -> present, no_vulva -> absent)
+python vulva/make_seg_labels.py --manual labels/vulva_measurements_manual_dataset.csv ^
+    --data-root "\\umad.umsystem.edu\rde\zhoujianf-lab\Pig project\Sow Data\Pictures_OAK" ^
+    --mask-root labels/vulva_masks_manual
+
+# 2. Train the U-Net (5-fold CV grouped by sow, then a final model -> models/vulva_seg.pth)
+python vulva/train_seg.py --labels labels/vulva_seg_labels.csv
+
+# 3. Run on posture predictions (standing frames only), compare with calipers
+python vulva/run_vulva.py outputs/gt_feb06/predictions.csv --windows 06:00-11:00,14:00-18:00 ^
+    --truth outputs/vulva/sow_day_truth.csv --save-masks
+
+# Noise check on any per-frame table (manual or run_vulva output)
+python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vulva/sow_day_truth.csv
+```
+
+| Script | What it does |
+|---|---|
+| `vulva/truth.py` | Reads Lucas's per-sow sheets (DAY, DATE, V. W., V. L., V. V., MORNING/EVENING heat = 20). V. V. is W × L / 200. |
+| `vulva/make_seg_labels.py` | Manual table + masks → `labels/vulva_seg_labels.csv` (finds IR frames again under `--data-root`). |
+| `vulva/seg_model.py` | U-Net with ResNet-18 encoder; stall crop 380 × 450 → 320 × 384; masks mapped back to 640 × 480. |
+| `vulva/train_seg.py` | CV by sow: presence precision / recall / F1 + confusion matrix, IoU / Dice on visible frames; saves the final model. |
+| `vulva/select_frames.py` | Standing frames from `predictions.csv` (confidence ≥ 0.6, ID problems dropped), optional time windows and cap per sow-day. |
+| `vulva/measure3d.py` | Skin plane from a ring around the mask (RANSAC); W and L along the in-plane axes (tilt removed), height above the plane, volume, quality numbers. Checked on synthetic tilted vulvas: within 1 mm and 4% volume up to 60° tilt. |
+| `vulva/daily.py` | Good frames → per sow-day median and MAD, % change from the first 2 days, join with calipers and heat days. |
+| `vulva/run_vulva.py` | Steps 1–4 in one command; writes `vulva_frames.csv`, `vulva_daily.csv`, `vulva_vs_caliper.csv`, `vulva_review.jpg`, `vulva_summary.json`. |
+| `vulva/repeatability.py` | Within-day SD, error vs calipers, frames needed per sow-day. |
+
+Checks: `python tests/test_vulva_pipeline.py` (7 synthetic tests, including a tiny train → run).
+
+### Next
+
+1. Copy Srikar's `labels/vulva_masks_manual/` and `vulva_measurements_manual_dataset.csv` to the lab PC and train (48 present + 180 absent frames, all Feb 11 morning, so the first model will be weak).
+2. Label more: run `run_vulva.py --save-masks`, review `vulva_review.jpg`, fix or add masks with `vulva/label_vulva.py` on other days and both feeding times. Aim for every sow on every day Feb 6–17.
+3. Score daily values against the calipers and heat days; then feed vulva change + nightly posture transitions + days from weaning to the estrus model.
+
+### Legacy manual tools (v1)
+
 
 ```bash
 # 1. Build 3D point clouds from depth raw files
@@ -207,11 +256,11 @@ python vulva/compare_vulva_ground_truths.py
 - **IR over RGB for rectangle selection.** IR is pixel-aligned with depth (same sensor); RGB has unresolvable calibration baseline.
 - **JET colormap** for depth visualization (matches reference paper).
 - **Open3D DBSCAN + ellipse fit** for strictly oval vulva masks.
-- **No frequency filtering / U-Net.** Reference paper (Xu et al. 2023) uses regionprops → largest round region. The 2024 follow-up adds U-Net — not implemented here.
+- **No frequency filtering / U-Net (v1 only).** Xu et al. (2023) uses regionprops → largest round region. The 2024 follow-up adds a U-Net, which v2 now uses (`vulva/seg_model.py`).
 
 ### Ground truth
 
-`ground_truths/vulva_ground_truths.csv` — caliper measurements from 20 pigs over 11 days.
+`ground_truths/vulva_ground_truths.csv` — caliper measurements from 20 pigs over 11 days. The source is Lucas's `Feb_2026.xlsx` (Teams > AI Imaging > Ground Truth); read it with `vulva/truth.py`.
 
 Sample result: pig0 L=55.86mm W=41.62mm (GT: W=41.0, L=79.3). Width matches well, length under-predicts.
 

@@ -13,7 +13,17 @@ python posture/run_inference.py "C:\PAAL_data\Fed_pig\Pictures_OAK"   # Windows 
 python posture/run_inference.py /path/to/data                          # Mac
 ```
 
-### Task B: Vulva measurement pipeline
+### Task B: Vulva pipeline v2 (learned, Oct 2026)
+```bash
+python vulva/truth.py Feb_2026.xlsx                                  # caliper + heat ground truth -> outputs/vulva/sow_day_truth.csv
+python vulva/make_seg_labels.py --manual labels/vulva_measurements_manual_dataset.csv --data-root <Pictures_OAK>
+python vulva/train_seg.py                                            # U-Net, CV by sow -> models/vulva_seg.pth
+python vulva/run_vulva.py <predictions.csv> --truth outputs/vulva/sow_day_truth.csv
+python vulva/repeatability.py <per-frame csv> --truth outputs/vulva/sow_day_truth.csv
+python tests/test_vulva_pipeline.py                                  # 7 synthetic checks
+```
+
+### Task B: legacy manual tools (v1)
 ```bash
 python vulva/build_depthmaps.py                                       # Step 1: depth → 3D point clouds (depthmap/)
 python vulva/build_vulva_rect_crops.py                                # Step 2: interactive vulva rectangle crop (depthmap_rect/)
@@ -59,6 +69,7 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 - `models/pig_detector.pth` — CNN pig-presence detector
 
 ### Task B (Vulva — IN PROGRESS, lives in `vulva/`)
+- v2: `truth.py`, `make_seg_labels.py`, `seg_model.py`, `train_seg.py`, `select_frames.py`, `measure3d.py`, `daily.py`, `run_vulva.py`, `repeatability.py` (see HANDOFF.md Task B)
 - `vulva/point_cloud.py` — Core 3D engine: depth backprojection, pig segmentation, vulva IR detection
 - `vulva/build_depthmaps.py` — Batch: all depth_*.raw → depthmap/ (232 pigs processed)
 - `vulva/crop_vulva_pointcloud.py` — Interactive vulva rectangle selection + cropped 3D export

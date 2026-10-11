@@ -1,5 +1,23 @@
 # Changelog
 
+## Vulva v2 — learned pipeline (October 2026, branch `vulva/v2-learned-pipeline`)
+
+New scripts in `vulva/`, all reading raw folders only and writing under `outputs/`:
+
+- `truth.py` reads Lucas's caliper + heat workbook (`Feb_2026.xlsx`) into a sow-day table and prints each sow's vulva rise during heat.
+- `make_seg_labels.py`, `seg_model.py`, `train_seg.py`: U-Net (ResNet-18 encoder) trained on the existing manual masks, cross-validated by sow; reports presence precision / recall / F1 with the confusion matrix, and IoU / Dice.
+- `select_frames.py`: standing frames from the posture predictions, optional feeding-time windows.
+- `measure3d.py`: width, length, height and volume in mm from the ToF depth, measured on the fitted skin plane so camera tilt does not shorten the length.
+- `daily.py`, `run_vulva.py`: one command from posture predictions to one value per sow per day, compared with the calipers and heat days.
+- `repeatability.py`: within-day noise of any per-frame table and how many frames a daily value needs.
+- `tests/test_vulva_pipeline.py`: 7 synthetic checks.
+
+### Findings that shaped it (2026-10-10)
+
+- Calipers, 20 sows, Feb 6–17: the W × L index rose a median 20% from baseline to the heat peak (> 10% in 14 of 19 sows in heat); width +9%, length +10%. Caliper day-to-day SD after heat: 2.6 mm width, 4.5 mm length.
+- Manual camera masks, Feb 11 morning (48 frames): same-sow SD within two hours 8.7 mm width, 7.7 mm length; per-frame error against calipers 9.9 mm width, 13.9 mm length. The change to detect is 4–6 mm, so daily medians of many frames are required.
+- Only the 09:06 and 09:17 passes showed most vulvas (15 and 11 of 20 sows); later passes showed 0–5.
+
 ## v1.1 — posture module review (October 2026)
 
 Merged into `main` on 2026-10-10 after validation on the lab PC. The shipped model (`posture3_ir_best.pth`, v1.0 release) is unchanged; v1.1 changes the pipeline around it.
