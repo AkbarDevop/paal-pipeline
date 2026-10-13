@@ -131,11 +131,14 @@ def read_sheet(ws, pig_id):
 def read_workbook(path, num_stalls=20):
     from openpyxl import load_workbook
     wb = load_workbook(path, data_only=True, read_only=True)
-    rows = []
-    for pid in range(num_stalls):
-        if str(pid) in wb.sheetnames:
-            rows.extend(read_sheet(wb[str(pid)], pid))
-    return rows
+    try:
+        rows = []
+        for pid in range(num_stalls):
+            if str(pid) in wb.sheetnames:
+                rows.extend(read_sheet(wb[str(pid)], pid))
+        return rows
+    finally:
+        wb.close()      # read-only workbooks keep the file open; Windows then cannot move or delete it
 
 
 def heat_response(rows):
