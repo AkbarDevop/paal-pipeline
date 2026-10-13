@@ -11,6 +11,7 @@ New scripts in `vulva/`, all reading raw folders only and writing under `outputs
 - `daily.py`, `run_vulva.py`: one command from posture predictions to one value per sow per day, compared with the calipers and heat days.
 - `repeatability.py`: within-day noise of any per-frame table and how many frames a daily value needs.
 - `tests/test_vulva_pipeline.py`: 7 synthetic checks.
+- `estrus/sow_days.py`, `estrus/evaluate.py`: the sow-day table for the heat model (night transitions, standing share, days since move, heat, vulva when available, each as change from the sow's own first days) and a leave-one-sow-out check of which inputs pick out heat days, with days-since-move alone as the reference. `tests/test_estrus_baseline.py`: 4 checks.
 
 ### Findings that shaped it (2026-10-10)
 

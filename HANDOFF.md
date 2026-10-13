@@ -224,6 +224,15 @@ Checks: `python tests/test_vulva_pipeline.py` (7 synthetic tests, including a ti
 2. Label more: run `run_vulva.py --save-masks`, review `vulva_review.jpg`, fix or add masks with `vulva/label_vulva.py` on other days and both feeding times. Aim for every sow on every day Feb 6–17.
 3. Score daily values against the calipers and heat days; then feed vulva change + nightly posture transitions + days from weaning to the estrus model.
 
+### Heat detection groundwork (`estrus/`)
+
+```bash
+python estrus/sow_days.py outputs/gt_feb06/predictions.csv outputs/vulva/sow_day_truth.csv [--vulva outputs/vulva/vulva_daily.csv]
+python estrus/evaluate.py outputs/estrus/sow_day_features.csv
+```
+
+One row per sow per day: posture for the night ending that morning (19:00–08:00, the `count_posture_changes.py` convention) and the daytime, days since the sows were moved in, heat from Lucas's MORNING/EVENING checks, and vulva values when `run_vulva.py` has produced them. `evaluate.py` scores each input on its own (AUC) and in leave-one-sow-out logistic regression, always next to days-since-move alone, because heat clusters a few days after weaning and any other input has to beat that.
+
 ### Legacy manual tools (v1)
 
 
