@@ -4,7 +4,7 @@
 For each frame of a label set (export_label_set.py) the IR image is shown,
 cropped to the stall and contrast-boosted:
 
-    click 1  top end of the vulva       (the view then zooms in around it)
+    click 1  top end of the vulva       (the view then zooms in below it; --zoom 0 turns that off)
     click 2  bottom end
     click 3  one side, at the widest point
     Enter    save the ellipse            n  not visible (tail, lying, blur)
@@ -83,7 +83,7 @@ def display_image(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("set_dir", help="folder from export_label_set.py")
-    ap.add_argument("--zoom", type=int, default=70, help="half-size of the zoomed view after the first click, px")
+    ap.add_argument("--zoom", type=int, default=100, help="half-width of the zoomed view after the first click, px (0 = no zoom)")
     args = ap.parse_args()
 
     import matplotlib.pyplot as plt
@@ -131,11 +131,11 @@ def main():
         ax.set_title(f"pig {fr['pig_id']}   {fr['pig_timestamp']}   [{n_done + 1}/{len(frames)}]\n"
                      "click top, bottom, side   Enter save   n not visible   u undo   s skip   q quit",
                      fontsize=10)
-        if state["clicks"]:
-            x, y = state["clicks"][0]
+        if state["clicks"] and args.zoom:
+            x, y = state["clicks"][0]          # zoom around the top end, mostly below it
             z = args.zoom
             ax.set_xlim(x - z, x + z)
-            ax.set_ylim(y + 1.6 * z, y - 0.6 * z)
+            ax.set_ylim(y + 2.0 * z, y - 0.4 * z)
         else:
             reset_view()
         ax.set_xticks([])
