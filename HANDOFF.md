@@ -216,7 +216,7 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 | `vulva/run_vulva.py` | Steps 1–4 in one command; writes `vulva_frames.csv`, `vulva_daily.csv`, `vulva_vs_caliper.csv`, `vulva_review.jpg`, `vulva_summary.json`. |
 | `vulva/repeatability.py` | Within-day SD, error vs calipers, frames needed per sow-day. |
 
-Checks: `python tests/test_vulva_pipeline.py` (10 synthetic tests, including a tiny train → run).
+Checks: `python tests/test_vulva_pipeline.py` (11 synthetic tests, including a tiny train → run).
 
 ### Labelling (the masks from the hand-crop work are not on the lab PC)
 
@@ -224,7 +224,8 @@ Checks: `python tests/test_vulva_pipeline.py` (10 synthetic tests, including a t
 # lab PC: copy standing frames (IR + depth) out of the raw share into a label set
 python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --per-day 3
 
-# any computer: 3 clicks per visible vulva (top, bottom, side), n = not visible; resumes where you stopped
+# any computer: 3 clicks per visible vulva (top, bottom, side), n = not visible; resumes where you stopped.
+# Shows IR | 3D shading | height (mm above the sow's own skin, from the aligned depth); click on any of them.
 python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
 
 # train straight from the label set (paths in labels.csv are relative to its folder)

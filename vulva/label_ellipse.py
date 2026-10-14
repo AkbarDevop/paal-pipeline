@@ -2,7 +2,11 @@
 """Fast vulva labelling: three clicks draw an ellipse, one key marks "not visible".
 
 For each frame of a label set (export_label_set.py) the IR image is shown,
-cropped to the stall and contrast-boosted:
+cropped to the stall and contrast-boosted, next to two pictures made from the
+pixel-aligned depth (depth_views.py): "3D shading" (the vulva is a lit oval
+lump; flat feces and dark marks vanish) and "height" (mm above the sow's own
+body surface, red = sticks out). Click on any of the three; the views zoom
+together. --no-depth shows the IR image alone.
 
     click 1  top end of the vulva       (the view then zooms in below it; --zoom 0 turns that off)
     click 2  bottom end
@@ -143,6 +147,8 @@ def main():
     ap.add_argument("--model", default="", help="vulva_seg checkpoint: show its ellipse as a suggestion")
     ap.add_argument("--hard-first", action="store_true",
                     help="with --model: least certain frames first (max probability closest to the threshold)")
+    ap.add_argument("--no-depth", action="store_true", help="IR image only (no 3D shading / height panels)")
+    ap.add_argument("--height-span", type=float, default=8.0, help="height colour scale, +/- mm")
     args = ap.parse_args()
 
     import matplotlib.pyplot as plt
@@ -173,11 +179,28 @@ def main():
             todo = [todo[k] for k in order]
 
     state = {"i": 0, "clicks": [], "quit": False, "suggested": False}
-    fig, ax = plt.subplots(figsize=(8, 9))
+    use_depth = not args.no_depth
+    if use_depth:
+        from depth_views import views_for
+        fig, axes = plt.subplots(1, 3, figsize=(14, 7.2), sharex=True, sharey=True)
+        fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.86, wspace=0.03)
+    else:
+        fig, ax0 = plt.subplots(figsize=(8, 9))
+        axes = [ax0]
+    ax = axes[0]
     fig.canvas.manager.set_window_title("PAAL vulva labelling")
+    view_cache = {}
 
     def current():
         return todo[state["i"]]
+
+    def depth_views(fr):
+        key = fr["ir_path"]
+        if key not in view_cache:
+            view_cache.clear()
+            dp = fr.get("depth_path", "")
+            view_cache[key] = views_for(os.path.join(set_dir, dp), args.height_span) if dp else None
+        return view_cache[key]
 
     def reset_view():
         ax.set_xlim(CROP[0], CROP[2])
@@ -195,26 +218,44 @@ def main():
             state["hint"] = f"model: not visible (p={pmax:.2f})  n agree, or click it"
 
     def draw():
-        ax.clear()
         fr = current()
         img = display_image(os.path.join(set_dir, fr["ir_path"]))
         if img is None:
             img = np.zeros((FULL_H, FULL_W), np.uint8)
-        ax.imshow(img, cmap="gray", vmin=0, vmax=255)
-        for k, (x, y) in enumerate(state["clicks"]):
-            ax.plot(x, y, "+", color=("#00e5ff", "#00e5ff", "#ffd400")[k], ms=12, mew=1.5)
-        if len(state["clicks"]) == 3:
-            e = ellipse_from_clicks(*state["clicks"])
+        panels = [("IR", img)]
+        if use_depth:
+            v = depth_views(fr)
+            if v is None:
+                blank = np.full((FULL_H, FULL_W, 3), 30, np.uint8)
+                panels += [("3D shading (no depth)", blank), ("height (no depth)", blank)]
+            else:
+                panels += [("3D shading", v[0]), (f"height, mm (+/-{args.height_span:g}, red = sticks out)", v[1])]
+        e = ellipse_from_clicks(*state["clicks"]) if len(state["clicks"]) == 3 else None
+        hand = not state["suggested"]
+        for a, (name, im) in zip(axes, panels):
+            a.clear()
+            if im.ndim == 2:
+                a.imshow(im, cmap="gray", vmin=0, vmax=255)
+            else:
+                a.imshow(im)
+            for k, (x, y) in enumerate(state["clicks"]):
+                a.plot(x, y, "+", color=("#ff3df2", "#ff3df2", "#ffffff")[k], ms=12, mew=1.8)
             if e:
-                ax.add_patch(Ellipse((e[0], e[1]), 2 * e[2], 2 * e[3], angle=e[4], fill=False,
-                                     ec="#ff9f1c" if state["suggested"] else "#00e5ff", lw=1.5,
-                                     ls="--" if state["suggested"] else "-"))
+                a.add_patch(Ellipse((e[0], e[1]), 2 * e[2], 2 * e[3], angle=e[4], fill=False,
+                                    ec="#ff3df2" if hand else "#ffffff", lw=1.6, ls="-" if hand else "--"))
+            if use_depth:
+                a.set_title(name, fontsize=9)
+            a.set_xticks([])
+            a.set_yticks([])
         n_done = len(done)
         hint = state.get("hint", "")
-        ax.set_title(f"pig {fr['pig_id']}   {fr['pig_timestamp']}   [{n_done + 1}/{len(frames)}]\n"
-                     + (hint + "\n" if hint else "")
-                     + "click top, bottom, side   Enter save   n not visible   u undo   s skip   q quit",
-                     fontsize=10)
+        title = (f"pig {fr['pig_id']}   {fr['pig_timestamp']}   [{n_done + 1}/{len(frames)}]\n"
+                 + (hint + "\n" if hint else "")
+                 + "click top, bottom, side   Enter save   n not visible   u undo   s skip   q quit")
+        if use_depth:
+            fig.suptitle(title, fontsize=10)
+        else:
+            ax.set_title(title, fontsize=10)
         if state["clicks"] and args.zoom:
             x, y = state["clicks"][0]          # zoom around the top end, mostly below it
             z = args.zoom
@@ -222,8 +263,6 @@ def main():
             ax.set_ylim(y + 2.0 * z, y - 0.4 * z)
         else:
             reset_view()
-        ax.set_xticks([])
-        ax.set_yticks([])
         fig.canvas.draw_idle()
 
     def record(label, params=None):
@@ -258,7 +297,7 @@ def main():
         draw()
 
     def on_click(ev):
-        if ev.inaxes != ax or ev.button != 1 or ev.xdata is None:
+        if ev.inaxes not in axes or ev.button != 1 or ev.xdata is None:
             return
         if fig.canvas.manager.toolbar is not None and getattr(fig.canvas.manager.toolbar, "mode", ""):
             return            # zoom / pan tool active

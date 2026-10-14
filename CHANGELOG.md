@@ -11,7 +11,7 @@ New scripts in `vulva/`, all reading raw folders only and writing under `outputs
 - `daily.py`, `run_vulva.py`: one command from posture predictions to one value per sow per day, compared with the calipers and heat days.
 - `repeatability.py`: within-day noise of any per-frame table and how many frames a daily value needs.
 - `export_label_set.py`, `label_ellipse.py`: copy standing frames out of the raw share and label them with three clicks per vulva (or one key for not visible); `train_seg.py` reads the label set's relative paths.
-- `tests/test_vulva_pipeline.py`: 10 synthetic checks.
+- `tests/test_vulva_pipeline.py`: 11 synthetic checks.
 - `estrus/sow_days.py`, `estrus/evaluate.py`: the sow-day table for the heat model (night transitions, standing share, days since move, heat, vulva when available, each as change from the sow's own first days) and a leave-one-sow-out check of which inputs pick out heat days, with days-since-move alone as the reference. `tests/test_estrus_baseline.py`: 4 checks.
 
 ### Findings that shaped it (2026-10-10)
@@ -26,6 +26,7 @@ New scripts in `vulva/`, all reading raw folders only and writing under `outputs
 - The clicked ellipses measure a median 81 × 41 mm (L × W) through `measure3d.py`, on the caliper scale (pig 0: 79 × 41 by caliper).
 - 5-fold CV by sow, 60 epochs on the MacBook Air (MPS, 29 min): visible-or-not precision 0.61, recall 0.85, F1 0.71 (22 of 64 not-visible frames called visible, 6 of 41 visible missed); IoU 0.59 and Dice 0.70 on frames both call visible; predicted area unbiased (median ratio 0.99) but spread 0.49–1.25 (IQR). Training loss was still falling at epoch 60.
 - Main error: false positives on the anus, feces and dark skin marks, plus a few oversized masks. On 30 unseen label-set frames it called 21 visible (median 83 × 44 mm).
+- `depth_views.py` (2026-10-14): two pictures from the aligned ToF depth, limited to the sow's body: 3D shading (lit relief) and height above the sow's own skin smoothed over 25 mm (±8 mm colour scale). The vulva shows as a red oval in the groove below the anus; feces and dark skin marks are flat and vanish. `label_ellipse.py` now shows IR | 3D shading | height side by side, zoomed together, clickable on any panel (`--no-depth` for IR only). Akbar asked for it because many vulvas are hard to see in IR alone. New test `test_depth_views_show_the_bump_and_drop_the_background`.
 - `label_ellipse.py --model --hard-first`: the model draws its ellipse first (Enter accepts, n agrees, a click redoes it), least-certain frames first; a `how` column records hand / accepted / corrected. New test `test_model_mask_to_clicks_round_trip`.
 
 ## v1.1 — posture module review (October 2026)

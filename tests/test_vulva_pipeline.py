@@ -295,6 +295,24 @@ def test_model_mask_to_clicks_round_trip():
         assert (a & b).sum() / (a | b).sum() > 0.93, (ang, e)
 
 
+def test_depth_views_show_the_bump_and_drop_the_background():
+    """Height view: the vulva bump reads as several mm proud of the skin, flat skin near 0,
+    and stall background far behind the sow is masked out (NaN)."""
+    from depth_views import relief, shade_image, height_image
+    depth, mask = render(tilt_deg=20, dist=700, W=40, L=70, H=15, noise=1.0, cx=320, cy=240)
+    depth = depth.copy()
+    depth[:, :150] = 2000                                    # far stall wall at the left
+    shade, height, zc = relief(depth)
+    assert 600 < zc < 850, zc
+    assert np.isnan(height[:, :140]).all()                   # background is not part of the sow
+    ys, xs = np.nonzero(mask)
+    peak = np.nanmedian(height[ys.min() + (ys.max() - ys.min()) // 3: ys.max() - (ys.max() - ys.min()) // 3,
+                               xs.min() + 5: xs.max() - 5])
+    skin = np.nanmedian(np.abs(height[380:450, 400:560]))
+    assert peak > 5 and skin < 1.5, (peak, skin)
+    assert shade_image(shade).shape == (480, 640, 3) and height_image(height).dtype == np.uint8
+
+
 def test_export_label_set_and_train_on_relative_paths():
     from export_label_set import export
     from train_seg import load_labels
