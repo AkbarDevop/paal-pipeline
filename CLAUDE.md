@@ -20,7 +20,7 @@ python vulva/make_seg_labels.py --manual labels/vulva_measurements_manual_datase
 python vulva/train_seg.py                                            # U-Net, CV by sow -> models/vulva_seg.pth
 python vulva/run_vulva.py <predictions.csv> --truth outputs/vulva/sow_day_truth.csv
 python vulva/repeatability.py <per-frame csv> --truth outputs/vulva/sow_day_truth.csv
-python tests/test_vulva_pipeline.py                                  # 7 synthetic checks
+python tests/test_vulva_pipeline.py                                  # 10 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

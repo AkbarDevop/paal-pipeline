@@ -216,7 +216,7 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 | `vulva/run_vulva.py` | Steps 1–4 in one command; writes `vulva_frames.csv`, `vulva_daily.csv`, `vulva_vs_caliper.csv`, `vulva_review.jpg`, `vulva_summary.json`. |
 | `vulva/repeatability.py` | Within-day SD, error vs calipers, frames needed per sow-day. |
 
-Checks: `python tests/test_vulva_pipeline.py` (7 synthetic tests, including a tiny train → run).
+Checks: `python tests/test_vulva_pipeline.py` (10 synthetic tests, including a tiny train → run).
 
 ### Labelling (the masks from the hand-crop work are not on the lab PC)
 
@@ -229,11 +229,16 @@ python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
 
 # train straight from the label set (paths in labels.csv are relative to its folder)
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv
+
+# after a first model: it suggests each ellipse (Enter accept, n agree, click to redo), hardest frames first
+python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r1.pth --hard-first
 ```
+
+Status (2026-10-13): 105 of the 360 frames labelled (41 visible). First model `models/vulva_seg_r1.pth` (Mac only, 57 MB): CV by sow F1 0.71 for visible-or-not (precision 0.61, recall 0.85), IoU 0.59. Details in CHANGELOG.md. Most errors are false positives on the anus, feces and dark marks, which is what the hard-first round should fix.
 
 ### Next
 
-1. Label the Feb 6–11 set (about 20 sows × 6 days × 3 frames), train, look at `vulva_review.jpg`.
+1. Model-assisted round on the remaining Feb 6–11 frames (`--model … --hard-first`), retrain with `--epochs 100` (loss was still falling at 60), compare with r1.
 2. Run `run_vulva.py` on all standing frames and compare the daily values with `Feb_2026.xlsx` (`truth.py`).
 3. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
 

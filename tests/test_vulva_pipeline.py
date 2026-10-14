@@ -278,6 +278,23 @@ def test_ellipse_from_three_clicks():
     assert abs(m.sum() - np.pi * 30 * 20) / (np.pi * 30 * 20) < 0.05
 
 
+def test_model_mask_to_clicks_round_trip():
+    """A predicted mask becomes three clicks that redraw the same ellipse (model-assisted labelling)."""
+    from label_ellipse import clicks_from_mask, ellipse_from_clicks, ellipse_mask
+    assert clicks_from_mask(np.zeros((480, 640), np.uint8)) is None
+    for ang in (90, 75, 110, 30, 0):
+        truth = (330.0, 240.0, 40.0, 22.0, float(ang))
+        clicks = clicks_from_mask(ellipse_mask(truth))
+        top, bottom, _ = clicks
+        assert top[1] <= bottom[1]
+        e = ellipse_from_clicks(*clicks)
+        assert abs(e[0] - 330) < 1.5 and abs(e[1] - 240) < 1.5, (ang, e)
+        assert abs(e[2] - 40) < 1.5 and abs(e[3] - 22) < 1.5, (ang, e)
+        a = ellipse_mask(truth) > 0
+        b = ellipse_mask(e) > 0
+        assert (a & b).sum() / (a | b).sum() > 0.93, (ang, e)
+
+
 def test_export_label_set_and_train_on_relative_paths():
     from export_label_set import export
     from train_seg import load_labels
