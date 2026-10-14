@@ -234,14 +234,14 @@ python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/lab
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv --inputs ir+depth
 
 # after a first model: it suggests each ellipse (Enter accept, n agree, click to redo), hardest frames first
-python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r1.pth --hard-first
+python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r2.pth --hard-first
 ```
 
-Status (2026-10-14): 215 of the 360 frames labelled (95 visible), snapshot `labels_r2.csv`; r2 (IR only) and r2d (IR + depth) training on it for a side-by-side CV comparison. Earlier, 2026-10-13: 105 labelled (41 visible). First model `models/vulva_seg_r1.pth` (Mac only, 57 MB): CV by sow F1 0.71 for visible-or-not (precision 0.61, recall 0.85), IoU 0.59. Details in CHANGELOG.md. Most errors are false positives on the anus, feces and dark marks, which is what the hard-first round should fix.
+Status (2026-10-14): 215 of the 360 frames labelled (95 visible), snapshot `labels_r2.csv`. Current model `models/vulva_seg_r2.pth` (IR only; Mac only): CV by sow F1 0.75 for visible-or-not, IoU 0.65. The IR + depth variant (r2d) scored lower (F1 0.69, IoU 0.55), so depth stays a labelling aid, not a model input, for now. Details in CHANGELOG.md. Before that, r1 (105 labels, `models/vulva_seg_r1.pth`): F1 0.71, IoU 0.59, mostly false positives on the anus, feces and dark marks.
 
 ### Next
 
-1. Model-assisted round on the remaining Feb 6–11 frames (`--model … --hard-first`), retrain with `--epochs 100` (loss was still falling at 60), compare with r1.
+1. Finish the last 145 Feb 6–11 frames with `--model models/vulva_seg_r2.pth` (mostly clean views the model already outlines), retrain on all 360 (r3), compare with r2 on the same folds.
 2. Run `run_vulva.py` on all standing frames and compare the daily values with `Feb_2026.xlsx` (`truth.py`).
 3. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
 
