@@ -39,10 +39,15 @@ MIN_AREA = 25    # model pixels; smaller blobs count as "no vulva"
 
 
 def load_labels(path):
+    """Label CSV from make_seg_labels.py or label_ellipse.py. Relative paths are
+    resolved against the CSV's folder, so a label set can move between computers."""
+    base = os.path.dirname(os.path.abspath(path))
+    res = lambda p: p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(base, p)  # noqa: E731
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = [r for r in csv.DictReader(f) if r["label"] in ("present", "absent")]
     items = []
     for r in rows:
+        r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
         img = read_ir(r["ir_path"])
         if img is None:
             continue

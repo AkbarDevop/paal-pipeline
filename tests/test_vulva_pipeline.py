@@ -268,6 +268,56 @@ def test_train_and_run_end_to_end():
         shutil.rmtree(tmp)
 
 
+def test_ellipse_from_three_clicks():
+    from label_ellipse import ellipse_from_clicks, ellipse_mask
+    e = ellipse_from_clicks((300, 200), (300, 260), (320, 230))      # vertical, 60 long, 40 wide
+    assert e[0] == 300 and e[1] == 230 and e[2] == 30 and abs(e[3] - 20) < 1e-9 and abs(e[4] - 90) < 1e-9
+    m = ellipse_mask(e) > 0
+    ys, xs = np.nonzero(m)
+    assert ys.min() == 200 and ys.max() == 260 and xs.min() == 280 and xs.max() == 320
+    assert abs(m.sum() - np.pi * 30 * 20) / (np.pi * 30 * 20) < 0.05
+
+
+def test_export_label_set_and_train_on_relative_paths():
+    from export_label_set import export
+    from train_seg import load_labels
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(5)
+        raw = os.path.join(tmp, "raw", "20260209-09-00-00")
+        os.makedirs(raw)
+        preds = []
+        for pid in range(3):
+            ts = f"20260209-09-00-{10 + pid:02d}"
+            _write_frame(raw, pid, ts, True, rng)
+            preds.append({"timestamp_folder": "20260209-09-00-00", "pig_id": pid, "pig_timestamp": ts,
+                          "prediction_name": "standing" if pid < 2 else "lying", "confidence": 0.9,
+                          "id_status": "ok", "image_path": os.path.join(raw, f"pig{pid}_ir_vis_{ts}.jpg")})
+        out = os.path.join(tmp, "set")
+        rows, missing = export(preds, out, per_day=3)
+        assert len(rows) == 2 and missing == 0
+        assert os.path.exists(os.path.join(out, rows[0]["depth_path"]))
+        assert not os.path.isabs(rows[0]["ir_path"])
+        # labels written the way label_ellipse.py writes them: relative to the set folder
+        os.makedirs(os.path.join(out, "masks"))
+        m = np.zeros((480, 640), np.uint8)
+        m[250:270, 310:325] = 255
+        cv2.imwrite(os.path.join(out, "masks", "a.png"), m)
+        with open(os.path.join(out, "labels.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["ir_path", "mask_path", "label", "pig_id",
+                                              "timestamp_folder", "pig_timestamp"])
+            w.writeheader()
+            w.writerow({"ir_path": rows[0]["ir_path"], "mask_path": "masks/a.png", "label": "present",
+                        "pig_id": 0, "timestamp_folder": rows[0]["timestamp_folder"],
+                        "pig_timestamp": rows[0]["pig_timestamp"]})
+            w.writerow({"ir_path": rows[1]["ir_path"], "mask_path": "", "label": "absent", "pig_id": 1,
+                        "timestamp_folder": rows[1]["timestamp_folder"], "pig_timestamp": rows[1]["pig_timestamp"]})
+        items = load_labels(os.path.join(out, "labels.csv"))
+        assert len(items) == 2 and items[0]["mask"].any() and not items[1]["mask"].any()
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):

@@ -10,6 +10,7 @@ New scripts in `vulva/`, all reading raw folders only and writing under `outputs
 - `measure3d.py`: width, length, height and volume in mm from the ToF depth, measured on the fitted skin plane so camera tilt does not shorten the length.
 - `daily.py`, `run_vulva.py`: one command from posture predictions to one value per sow per day, compared with the calipers and heat days.
 - `repeatability.py`: within-day noise of any per-frame table and how many frames a daily value needs.
+- `export_label_set.py`, `label_ellipse.py`: copy standing frames out of the raw share and label them with three clicks per vulva (or one key for not visible); `train_seg.py` reads the label set's relative paths.
 - `tests/test_vulva_pipeline.py`: 7 synthetic checks.
 - `estrus/sow_days.py`, `estrus/evaluate.py`: the sow-day table for the heat model (night transitions, standing share, days since move, heat, vulva when available, each as change from the sow's own first days) and a leave-one-sow-out check of which inputs pick out heat days, with days-since-move alone as the reference. `tests/test_estrus_baseline.py`: 4 checks.
 

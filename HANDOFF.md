@@ -218,11 +218,24 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 
 Checks: `python tests/test_vulva_pipeline.py` (7 synthetic tests, including a tiny train → run).
 
+### Labelling (the masks from the hand-crop work are not on the lab PC)
+
+```bash
+# lab PC: copy standing frames (IR + depth) out of the raw share into a label set
+python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --per-day 3
+
+# any computer: 3 clicks per visible vulva (top, bottom, side), n = not visible; resumes where you stopped
+python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
+
+# train straight from the label set (paths in labels.csv are relative to its folder)
+python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv
+```
+
 ### Next
 
-1. Copy Srikar's `labels/vulva_masks_manual/` and `vulva_measurements_manual_dataset.csv` to the lab PC and train (48 present + 180 absent frames, all Feb 11 morning, so the first model will be weak).
-2. Label more: run `run_vulva.py --save-masks`, review `vulva_review.jpg`, fix or add masks with `vulva/label_vulva.py` on other days and both feeding times. Aim for every sow on every day Feb 6–17.
-3. Score daily values against the calipers and heat days; then feed vulva change + nightly posture transitions + days from weaning to the estrus model.
+1. Label the Feb 6–11 set (about 20 sows × 6 days × 3 frames), train, look at `vulva_review.jpg`.
+2. Run `run_vulva.py` on all standing frames and compare the daily values with `Feb_2026.xlsx` (`truth.py`).
+3. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
 
 ### Heat detection groundwork (`estrus/`)
 
