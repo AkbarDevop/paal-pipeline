@@ -11,6 +11,7 @@
 Usage:
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv --folds 5 --epochs 60
+    python vulva/train_seg.py --labels <label set>/labels.csv --inputs ir+depth   # IR + height + shading
 """
 
 from __future__ import annotations
@@ -32,15 +33,17 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from seg_model import (SEG_H, SEG_W, VulvaUNet, largest_component, read_ir, read_mask,  # noqa: E402
-                       save_checkpoint, to_model_space, to_tensor)
+from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, largest_component, read_input,  # noqa: E402
+                       read_mask, save_checkpoint, to_model_space, to_tensor)
 
 MIN_AREA = 25    # model pixels; smaller blobs count as "no vulva"
 
 
-def load_labels(path):
+def load_labels(path, inputs="ir"):
     """Label CSV from make_seg_labels.py or label_ellipse.py. Relative paths are
-    resolved against the CSV's folder, so a label set can move between computers."""
+    resolved against the CSV's folder, so a label set can move between computers.
+    With inputs="ir+depth" the depth file is taken from a depth_path column or,
+    without one, from the IR file name (pigN_depth_<ts>.raw next to the IR)."""
     base = os.path.dirname(os.path.abspath(path))
     res = lambda p: p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(base, p)  # noqa: E731
     with open(path, newline="", encoding="utf-8-sig") as f:
@@ -48,7 +51,7 @@ def load_labels(path):
     items = []
     for r in rows:
         r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
-        img = read_ir(r["ir_path"])
+        img = read_input(r["ir_path"], res(r.get("depth_path", "")) or None, inputs)
         if img is None:
             continue
         if r["label"] == "present":
@@ -56,9 +59,9 @@ def load_labels(path):
             if m is None or m.sum() == 0:
                 continue
         else:
-            m = np.zeros_like(img)
+            m = np.zeros(img.shape[:2], np.uint8)
         g, mk = to_model_space(img, m)
-        items.append({"gray": g, "mask": mk, "pig_id": int(float(r["pig_id"])), "row": r})
+        items.append({"image": g, "mask": mk, "pig_id": int(float(r["pig_id"])), "row": r})
     return items
 
 
@@ -77,7 +80,7 @@ class SegData(Dataset):
         return len(self.items)
 
     def __getitem__(self, i):
-        g, m = self.items[i]["gray"].copy(), self.items[i]["mask"].copy()
+        g, m = self.items[i]["image"].copy(), self.items[i]["mask"].copy()
         if self.augment:
             if random.random() < 0.5:
                 g, m = g[:, ::-1].copy(), m[:, ::-1].copy()
@@ -89,7 +92,10 @@ class SegData(Dataset):
             g = cv2.warpAffine(g, A, (SEG_W, SEG_H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
             m = cv2.warpAffine(m, A, (SEG_W, SEG_H), flags=cv2.INTER_NEAREST, borderValue=0)
             a, b = random.uniform(0.7, 1.3), random.uniform(-25, 25)
-            g = np.clip(g.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
+            if g.ndim == 2:
+                g = np.clip(g.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
+            else:                                  # brightness/contrast only on the IR channel
+                g[..., 0] = np.clip(g[..., 0].astype(np.float32) * a + b, 0, 255).astype(np.uint8)
         return to_tensor(g), torch.from_numpy(m.astype(np.float32))[None]
 
 
@@ -136,7 +142,7 @@ def predict_probs(model, items, device):
     model.eval()
     out = []
     for i in range(0, len(items), 16):
-        x = torch.stack([to_tensor(it["gray"]) for it in items[i:i + 16]]).to(device)
+        x = torch.stack([to_tensor(it["image"]) for it in items[i:i + 16]]).to(device)
         out.extend(torch.sigmoid(model(x))[:, 0].cpu().numpy().astype(np.float16))
     return out
 
@@ -204,6 +210,8 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--pos-weight", type=float, default=1.0,
                     help="BCE weight on vulva pixels; above 1 grows masks (Dice already handles imbalance)")
+    ap.add_argument("--inputs", choices=INPUTS, default="ir",
+                    help='"ir" or "ir+depth" (IR, height above the skin and 3D shading as the 3 channels)')
     ap.add_argument("--no-pretrained", action="store_true", help="random init (tests / offline)")
     ap.add_argument("--out-model", default=os.path.join("models", "vulva_seg.pth"))
     ap.add_argument("--out-dir", default=os.path.join("outputs", "vulva_seg"))
@@ -222,15 +230,16 @@ def main():
         log_lines.append(s)
 
     t0 = time.time()
-    items = load_labels(args.labels)
+    items = load_labels(args.labels, args.inputs)
     pigs = sorted({it["pig_id"] for it in items})
     n_pos = int(sum(bool(it["mask"].any()) for it in items))
-    log(f"{len(items)} frames from {len(pigs)} sows: {n_pos} with a vulva mask, {len(items) - n_pos} without")
+    log(f"{len(items)} frames from {len(pigs)} sows: {n_pos} with a vulva mask, {len(items) - n_pos} without"
+        f"  (inputs: {args.inputs})")
     if n_pos == 0:
         sys.exit("No vulva masks found; check --labels and the mask paths.")
 
     report = {"labels": args.labels, "frames": len(items), "present": n_pos, "sows": pigs,
-              "epochs": args.epochs, "device": device}
+              "epochs": args.epochs, "device": device, "inputs": args.inputs}
     if args.folds and len(pigs) >= args.folds:
         folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
         report["folds"] = {str(k): sorted(p for p, f in folds.items() if f == k) for k in range(args.folds)}
@@ -276,7 +285,7 @@ def main():
     log("")
     log(f"Final model on all {len(items)} frames ...")
     model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log, args.pos_weight)
-    save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold,
+    save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold, "inputs": args.inputs,
                                             "trained_on": len(items), "sows": pigs,
                                             "date": time.strftime("%Y-%m-%d")})
     log(f"Saved {args.out_model}  ({time.time() - t0:.0f} s)")

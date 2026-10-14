@@ -216,7 +216,7 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 | `vulva/run_vulva.py` | Steps 1–4 in one command; writes `vulva_frames.csv`, `vulva_daily.csv`, `vulva_vs_caliper.csv`, `vulva_review.jpg`, `vulva_summary.json`. |
 | `vulva/repeatability.py` | Within-day SD, error vs calipers, frames needed per sow-day. |
 
-Checks: `python tests/test_vulva_pipeline.py` (11 synthetic tests, including a tiny train → run).
+Checks: `python tests/test_vulva_pipeline.py` (12 synthetic tests, including a tiny train → run).
 
 ### Labelling (the masks from the hand-crop work are not on the lab PC)
 
@@ -230,12 +230,14 @@ python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
 
 # train straight from the label set (paths in labels.csv are relative to its folder)
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv
+# same, with depth as extra input channels (height above the skin + 3D shading)
+python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv --inputs ir+depth
 
 # after a first model: it suggests each ellipse (Enter accept, n agree, click to redo), hardest frames first
 python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r1.pth --hard-first
 ```
 
-Status (2026-10-13): 105 of the 360 frames labelled (41 visible). First model `models/vulva_seg_r1.pth` (Mac only, 57 MB): CV by sow F1 0.71 for visible-or-not (precision 0.61, recall 0.85), IoU 0.59. Details in CHANGELOG.md. Most errors are false positives on the anus, feces and dark marks, which is what the hard-first round should fix.
+Status (2026-10-14): 215 of the 360 frames labelled (95 visible), snapshot `labels_r2.csv`; r2 (IR only) and r2d (IR + depth) training on it for a side-by-side CV comparison. Earlier, 2026-10-13: 105 labelled (41 visible). First model `models/vulva_seg_r1.pth` (Mac only, 57 MB): CV by sow F1 0.71 for visible-or-not (precision 0.61, recall 0.85), IoU 0.59. Details in CHANGELOG.md. Most errors are false positives on the anus, feces and dark marks, which is what the hard-first round should fix.
 
 ### Next
 

@@ -88,11 +88,12 @@ class Suggester:
 
     def __init__(self, ckpt_path):
         import torch
-        from seg_model import load_checkpoint, read_ir
-        self.read_ir = read_ir
+        from seg_model import load_checkpoint, read_input
+        self.read_input = read_input
         self.device = "mps" if torch.backends.mps.is_available() else "cpu"
         self.model, ck = load_checkpoint(ckpt_path, self.device)
         self.thr, self.min_area = ck.get("threshold", 0.5), ck.get("min_area", 25)
+        self.inputs = ck.get("inputs", "ir")
         self.cache = {}
 
     def __call__(self, paths):
@@ -100,7 +101,7 @@ class Suggester:
         need = [p for p in paths if p not in self.cache]
         for i in range(0, len(need), 16):
             chunk = need[i:i + 16]
-            grays = [self.read_ir(p) for p in chunk]
+            grays = [self.read_input(p, None, self.inputs) for p in chunk]
             ok = [j for j, g in enumerate(grays) if g is not None]
             res = predict(self.model, [grays[j] for j in ok], self.device, self.thr, self.min_area) if ok else []
             for p in chunk:

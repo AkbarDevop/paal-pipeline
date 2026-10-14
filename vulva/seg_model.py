@@ -6,7 +6,11 @@ keeps skip connections down to half resolution, because on the OAK-D IR image
 the vulva is only about 15 x 25 pixels.
 
 Input: the IR frame cropped to the stall (config.CROP_TOF), resized to
-SEG_W x SEG_H, grey replicated to 3 channels, ImageNet-normalised.
+SEG_W x SEG_H, ImageNet-normalised. Two input sets, stored in the checkpoint:
+  "ir"        grey IR replicated to 3 channels (models up to r1)
+  "ir+depth"  IR, height above the sow's own skin and 3D shading as the three
+              channels (depth_views.py). The vulva sticks out of the skin, while
+              feces and dark marks are flat, so depth separates the two.
 A predicted mask is mapped back to the full 640 x 480 frame so it lines up with
 the depth image from the same sensor.
 """
@@ -23,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import CROP_TOF  # noqa: E402
 
 SEG_W, SEG_H = 320, 384          # crop 380 x 450 -> about 0.84 scale
@@ -60,8 +65,51 @@ def read_mask(path):
     return (m > 127).astype(np.uint8)
 
 
+INPUTS = ("ir", "ir+depth")
+HEIGHT_SPAN_MM = 8.0
+
+
+def default_depth_path(ir_path):
+    """pigN_ir_vis_<ts>.jpg -> pigN_depth_<ts>.raw in the same folder (OAK naming)."""
+    d, name = os.path.split(ir_path)
+    return os.path.join(d, name.replace("_ir_vis_", "_depth_").rsplit(".", 1)[0] + ".raw")
+
+
+def make_input(ir_gray, depth_mm=None, inputs="ir"):
+    """Full-frame model input: the grey IR for "ir"; for "ir+depth" an H x W x 3 uint8
+    stack of IR, height (+/-8 mm -> 0..255, 128 = level with the skin) and shading.
+    Missing depth gives flat height and zero shading, which the model sees as 'no 3D cue'."""
+    if inputs == "ir":
+        return ir_gray
+    if inputs != "ir+depth":
+        raise ValueError(f"unknown inputs {inputs!r}; expected one of {INPUTS}")
+    h = np.full(ir_gray.shape, 128, np.uint8)
+    sh = np.zeros(ir_gray.shape, np.uint8)
+    if depth_mm is not None:
+        from depth_views import relief
+        shade, height, _ = relief(depth_mm)
+        y = np.clip((np.nan_to_num(height, nan=0.0) + HEIGHT_SPAN_MM) / (2 * HEIGHT_SPAN_MM), 0, 1)
+        h = (y * 255).astype(np.uint8)
+        sh = (np.clip((np.nan_to_num(shade, nan=0.6) - 0.6) / 0.4, 0, 1) * 255).astype(np.uint8)
+    return np.dstack([ir_gray, h, sh])
+
+
+def read_input(ir_path, depth_path=None, inputs="ir"):
+    """IR (+ depth) files -> full-frame model input, or None if the IR is unreadable."""
+    ir = read_ir(ir_path)
+    if ir is None or inputs == "ir":
+        return ir
+    from measure3d import load_depth_raw
+    dp = depth_path or default_depth_path(ir_path)
+    return make_input(ir, load_depth_raw(dp), inputs)
+
+
+def ir_channel(img):
+    return img if img.ndim == 2 else np.ascontiguousarray(img[..., 0])
+
+
 def to_model_space(img, mask=None):
-    """Full-frame grey image (and mask) -> stall crop resized to SEG_W x SEG_H."""
+    """Full-frame input (grey or H x W x 3) and mask -> stall crop resized to SEG_W x SEG_H."""
     x1, y1, x2, y2 = crop_box()
     im = cv2.resize(img[y1:y2, x1:x2], (SEG_W, SEG_H), interpolation=cv2.INTER_LINEAR)
     if mask is None:
@@ -79,8 +127,11 @@ def to_full_frame(mask_small):
     return full
 
 
-def to_tensor(gray):
-    x = np.repeat(gray[..., None].astype(np.float32) / 255.0, 3, axis=2)
+def to_tensor(img):
+    """Grey (replicated) or H x W x 3 uint8 -> normalised 3 x H x W tensor."""
+    x = img.astype(np.float32) / 255.0
+    if x.ndim == 2:
+        x = np.repeat(x[..., None], 3, axis=2)
     x = (x - MEAN) / STD
     return torch.from_numpy(x.transpose(2, 0, 1).copy())
 
@@ -143,7 +194,8 @@ def load_checkpoint(path, device="cpu"):
 
 @torch.no_grad()
 def predict(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size=16):
-    """Full-frame grey images -> list of (full-frame mask uint8, max prob, area in model pixels)."""
+    """Full-frame inputs (read_input / make_input; plain grey for "ir" models)
+    -> list of (full-frame mask uint8, max prob, area in model pixels)."""
     out = []
     for i in range(0, len(grays), batch_size):
         chunk = grays[i:i + batch_size]

@@ -262,6 +262,19 @@ def test_train_and_run_end_to_end():
         assert all(r["measure_status"] for r in rows)
         assert os.path.exists(os.path.join(outdir, "vulva_daily.csv"))
         assert os.path.exists(os.path.join(outdir, "vulva_summary.json"))
+        # IR + depth model: trains, records its inputs, and run_vulva feeds it depth
+        model_d = os.path.join(tmp, "models", "vulva_seg_d.pth")
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels", labels, "--folds", "0",
+                              "--epochs", "3", "--no-pretrained", "--inputs", "ir+depth", "--out-model", model_d,
+                              "--out-dir", os.path.join(tmp, "seg_d")], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert "(inputs: ir+depth)" in out.stdout
+        import torch
+        assert torch.load(model_d, map_location="cpu", weights_only=False)["inputs"] == "ir+depth"
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "run_vulva.py"), pred_csv, "--model", model_d,
+                              "--out-dir", os.path.join(tmp, "out_d"), "--min-frames", "1"],
+                             capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
         # nothing written next to the raw frames
         assert all(not n.endswith(".png") for _, _, fs in os.walk(data) for n in fs)
     finally:
@@ -293,6 +306,22 @@ def test_model_mask_to_clicks_round_trip():
         a = ellipse_mask(truth) > 0
         b = ellipse_mask(e) > 0
         assert (a & b).sum() / (a | b).sum() > 0.93, (ang, e)
+
+
+def test_depth_input_stack():
+    """ir+depth input: channel 0 is the IR, channel 1 height (128 = level skin, higher on the bump),
+    channel 2 shading; missing depth gives a flat, cue-free stack."""
+    from seg_model import make_input, to_model_space, to_tensor
+    depth, mask = render(tilt_deg=20, dist=700, W=40, L=70, H=15, noise=0.5, cx=320, cy=240)
+    ir = np.full((480, 640), 90, np.uint8)
+    x = make_input(ir, depth, "ir+depth")
+    assert x.shape == (480, 640, 3) and (x[..., 0] == 90).all()
+    assert np.median(x[..., 1][mask]) > 150 and abs(int(np.median(x[..., 1][380:450, 400:560])) - 128) < 10
+    flat = make_input(ir, None, "ir+depth")
+    assert (flat[..., 1] == 128).all() and (flat[..., 2] == 0).all()
+    assert make_input(ir, depth, "ir") is ir
+    im, _ = to_model_space(x)
+    assert to_tensor(im).shape == (3, 384, 320) and to_tensor(to_model_space(ir)[0]).shape == (3, 384, 320)
 
 
 def test_depth_views_show_the_bump_and_drop_the_background():

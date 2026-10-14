@@ -33,7 +33,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 from daily import METRICS, add_baseline_change, aggregate, compare_truth  # noqa: E402
 from measure3d import MEASURE_FIELDS, load_depth_raw, load_intrinsics, measure  # noqa: E402
-from seg_model import load_checkpoint, predict, read_ir  # noqa: E402
+from seg_model import ir_channel, load_checkpoint, predict, read_input  # noqa: E402
 from select_frames import parse_windows, select  # noqa: E402
 
 FRAME_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence",
@@ -92,6 +92,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model, ckpt = load_checkpoint(args.model, device)
     thr, min_area = ckpt.get("threshold", 0.5), ckpt.get("min_area", 25)
+    inputs = ckpt.get("inputs", "ir")
     K = load_intrinsics(args.calibration)
 
     with open(args.predictions, newline="", encoding="utf-8-sig") as f:
@@ -105,7 +106,7 @@ def main():
     rows, tiles = [], []
     for i in range(0, len(cands), 64):
         chunk = cands[i:i + 64]
-        grays = [read_ir(c["ir_path"]) for c in chunk]
+        grays = [read_input(c["ir_path"], c["depth_path"], inputs) for c in chunk]
         ok = [j for j, g in enumerate(grays) if g is not None]
         res = predict(model, [grays[j] for j in ok], device, thr, min_area, args.batch_size)
         res_by = dict(zip(ok, res))
@@ -125,7 +126,7 @@ def main():
                     cv2.imwrite(p, mask * 255)
                     row["mask_path"] = p
                 if len(tiles) < args.overlays and m["measure_status"] == "ok":
-                    tiles.append(overlay_tile(grays[j], mask, f"p{c['pig_id']} {c['pig_timestamp'][4:13]} "
+                    tiles.append(overlay_tile(ir_channel(grays[j]), mask, f"p{c['pig_id']} {c['pig_timestamp'][4:13]} "
                                               f"W{m['width_mm']:.0f} L{m['length_mm']:.0f}"))
             else:
                 row["measure_status"] = "not_visible"
