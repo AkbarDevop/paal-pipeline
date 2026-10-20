@@ -216,7 +216,7 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 | `vulva/run_vulva.py` | Steps 1–4 in one command; writes `vulva_frames.csv`, `vulva_daily.csv`, `vulva_vs_caliper.csv`, `vulva_review.jpg`, `vulva_summary.json`. |
 | `vulva/repeatability.py` | Within-day SD, error vs calipers, frames needed per sow-day. |
 
-Checks: `python tests/test_vulva_pipeline.py` (12 synthetic tests, including a tiny train → run).
+Checks: `python tests/test_vulva_pipeline.py` (13 synthetic tests, including a tiny train → run).
 
 ### Labelling (the masks from the hand-crop work are not on the lab PC)
 
@@ -232,6 +232,10 @@ python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv
 # same, with depth as extra input channels (height above the skin + 3D shading)
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv --inputs ir+depth
+
+# colour images too (lab PC; keeps the frames and labels): aligned RGB becomes a 4th clickable panel,
+# plain RGB from the separate colour camera is shown whole for reference
+python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --add-rgb
 
 # after a first model: it suggests each ellipse (Enter accept, n agree, click to redo), hardest frames first
 python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r2.pth --hard-first

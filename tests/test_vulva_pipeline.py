@@ -342,6 +342,44 @@ def test_depth_views_show_the_bump_and_drop_the_background():
     assert shade_image(shade).shape == (480, 640, 3) and height_image(height).dtype == np.uint8
 
 
+def test_add_rgb_keeps_frames_and_labels():
+    """--add-rgb copies pigN_rgb_aligned / pigN_rgb next to the frames already in the set and
+    adds their columns; the frame list and labels.csv stay as they were."""
+    from export_label_set import export, add_rgb
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(9)
+        raw = os.path.join(tmp, "raw", "20260210-09-00-00")
+        os.makedirs(raw)
+        preds = []
+        for pid in range(3):
+            ts = f"20260210-09-00-{10 + pid:02d}"
+            _write_frame(raw, pid, ts, True, rng)
+            cv2.imwrite(os.path.join(raw, f"pig{pid}_rgb_{ts}.jpg"), np.full((720, 1280, 3), 90, np.uint8))
+            if pid != 1:                                   # one frame without an aligned image
+                cv2.imwrite(os.path.join(raw, f"pig{pid}_rgb_aligned_{ts}.jpg"), np.full((480, 640, 3), 120, np.uint8))
+            preds.append({"timestamp_folder": "20260210-09-00-00", "pig_id": pid, "pig_timestamp": ts,
+                          "prediction_name": "standing", "confidence": 0.9, "id_status": "ok",
+                          "image_path": os.path.join(raw, f"pig{pid}_ir_vis_{ts}.jpg")})
+        out = os.path.join(tmp, "set")
+        rows, _ = export(preds, out, per_day=3)
+        assert "rgb_path" not in rows[0]
+        with open(os.path.join(out, "labels.csv"), "w") as f:
+            f.write("ir_path,label\n" + rows[0]["ir_path"] + ",absent\n")
+        before = open(os.path.join(out, "label_set.csv")).read().splitlines()
+        n, counts, no_source = add_rgb(preds, out)
+        assert n == 3 and no_source == 0 and counts == {"rgb_aligned_path": 2, "rgb_path": 3}, counts
+        with open(os.path.join(out, "label_set.csv"), newline="") as f:
+            new = list(csv.DictReader(f))
+        assert [r["ir_path"] for r in new] == [ln.split(",")[3] for ln in before[1:]]
+        assert all(os.path.exists(os.path.join(out, r["rgb_path"])) for r in new)
+        assert new[1]["rgb_aligned_path"] == "" and os.path.exists(os.path.join(out, new[0]["rgb_aligned_path"]))
+        assert open(os.path.join(out, "labels.csv")).read().count("absent") == 1
+        assert len(os.listdir(raw)) == 3 * 3 + 2                    # raw folder only read: ir, depth, rgb (+2 aligned)
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_export_label_set_and_train_on_relative_paths():
     from export_label_set import export
     from train_seg import load_labels

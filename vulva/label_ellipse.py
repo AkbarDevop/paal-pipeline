@@ -8,6 +8,10 @@ lump; flat feces and dark marks vanish) and "height" (mm above the sow's own
 body surface, red = sticks out). Click on any of the three; the views zoom
 together. --no-depth shows the IR image alone.
 
+If the set has colour images (export_label_set.py --rgb / --add-rgb), the
+aligned RGB is a fourth clickable panel; plain RGB from the separate colour
+camera is not pixel-aligned, so it is shown whole, for reference. --no-rgb hides it.
+
     click 1  top end of the vulva       (the view then zooms in below it; --zoom 0 turns that off)
     click 2  bottom end
     click 3  one side, at the widest point
@@ -149,6 +153,7 @@ def main():
     ap.add_argument("--hard-first", action="store_true",
                     help="with --model: least certain frames first (max probability closest to the threshold)")
     ap.add_argument("--no-depth", action="store_true", help="IR image only (no 3D shading / height panels)")
+    ap.add_argument("--no-rgb", action="store_true", help="hide the colour image even if the set has one")
     ap.add_argument("--height-span", type=float, default=8.0, help="height colour scale, +/- mm")
     args = ap.parse_args()
 
@@ -183,14 +188,39 @@ def main():
     use_depth = not args.no_depth
     if use_depth:
         from depth_views import views_for
-        fig, axes = plt.subplots(1, 3, figsize=(14, 7.2), sharex=True, sharey=True)
+    # colour: aligned RGB shares the IR pixel grid (clickable, zooms with the others);
+    # plain RGB is a separate camera, so it is shown whole, for reference only
+    rgb_mode = None
+    if not args.no_rgb:
+        if any(fr.get("rgb_aligned_path") for fr in frames):
+            rgb_mode = "aligned"
+        elif any(fr.get("rgb_path") for fr in frames):
+            rgb_mode = "reference"
+    n_linked = 1 + 2 * use_depth + (rgb_mode == "aligned")
+    n_total = n_linked + (rgb_mode == "reference")
+    multi = n_total > 1
+    fig = plt.figure(figsize=(3.55 * n_total + 0.3, 7.2) if multi else (8, 9))
+    axes = []
+    for k in range(n_linked):
+        axes.append(fig.add_subplot(1, n_total, k + 1, sharex=axes[0] if axes else None,
+                                    sharey=axes[0] if axes else None))
+    ref_ax = fig.add_subplot(1, n_total, n_total) if rgb_mode == "reference" else None
+    if multi:
         fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.86, wspace=0.03)
-    else:
-        fig, ax0 = plt.subplots(figsize=(8, 9))
-        axes = [ax0]
     ax = axes[0]
     fig.canvas.manager.set_window_title("PAAL vulva labelling")
     view_cache = {}
+
+    def read_rgb(rel, aligned):
+        if not rel:
+            return None
+        im = cv2.imread(os.path.join(set_dir, rel), cv2.IMREAD_COLOR)
+        if im is None:
+            return None
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+        if aligned and im.shape[:2] != (FULL_H, FULL_W):
+            im = cv2.resize(im, (FULL_W, FULL_H))
+        return im
 
     def current():
         return todo[state["i"]]
@@ -231,6 +261,10 @@ def main():
                 panels += [("3D shading (no depth)", blank), ("height (no depth)", blank)]
             else:
                 panels += [("3D shading", v[0]), (f"height, mm (+/-{args.height_span:g}, red = sticks out)", v[1])]
+        if rgb_mode == "aligned":
+            rgb = read_rgb(fr.get("rgb_aligned_path", ""), True)
+            panels.append(("RGB (aligned)" if rgb is not None else "RGB (none for this frame)",
+                           rgb if rgb is not None else np.full((FULL_H, FULL_W, 3), 30, np.uint8)))
         e = ellipse_from_clicks(*state["clicks"]) if len(state["clicks"]) == 3 else None
         hand = not state["suggested"]
         for a, (name, im) in zip(axes, panels):
@@ -244,16 +278,26 @@ def main():
             if e:
                 a.add_patch(Ellipse((e[0], e[1]), 2 * e[2], 2 * e[3], angle=e[4], fill=False,
                                     ec="#ff3df2" if hand else "#ffffff", lw=1.6, ls="-" if hand else "--"))
-            if use_depth:
+            if multi:
                 a.set_title(name, fontsize=9)
             a.set_xticks([])
             a.set_yticks([])
+        if ref_ax is not None:
+            ref_ax.clear()
+            rgb = read_rgb(fr.get("rgb_path", ""), False)
+            if rgb is not None:
+                ref_ax.imshow(rgb)
+                ref_ax.set_title("RGB (separate camera, reference only)", fontsize=9)
+            else:
+                ref_ax.set_title("RGB (none for this frame)", fontsize=9)
+            ref_ax.set_xticks([])
+            ref_ax.set_yticks([])
         n_done = len(done)
         hint = state.get("hint", "")
         title = (f"pig {fr['pig_id']}   {fr['pig_timestamp']}   [{n_done + 1}/{len(frames)}]\n"
                  + (hint + "\n" if hint else "")
                  + "click top, bottom, side   Enter save   n not visible   u undo   s skip   q quit")
-        if use_depth:
+        if multi:
             fig.suptitle(title, fontsize=10)
         else:
             ax.set_title(title, fontsize=10)
