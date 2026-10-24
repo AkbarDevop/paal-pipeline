@@ -275,11 +275,15 @@ def main():
             f"area error {overall['area_error_mean']}")
         with open(os.path.join(args.out_dir, "cv_predictions.csv"), "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "label", "pred_area_px", "true_area_px"])
+            # per frame, so results can be split later (e.g. hand-drawn vs accepted model suggestions)
+            w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "fold",
+                        "pred_area_px", "true_area_px", "iou"])
             for it, p in zip(items, oof):
                 r = it["row"]
-                w.writerow([r["timestamp_folder"], r["pig_id"], r["pig_timestamp"], r["label"],
-                            int(p.sum()), int(it["mask"].sum())])
+                t, q = it["mask"].astype(bool), p.astype(bool)
+                iou = round(float((t & q).sum() / (t | q).sum()), 4) if (t.any() and q.any()) else ""
+                w.writerow([r["timestamp_folder"], r["pig_id"], r["pig_timestamp"], r["label"], r.get("how", ""),
+                            folds[it["pig_id"]], int(p.sum()), int(it["mask"].sum()), iou])
     else:
         threshold = 0.5
     log("")
