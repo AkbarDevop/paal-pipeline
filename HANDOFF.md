@@ -241,7 +241,7 @@ python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paa
 python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r2.pth --hard-first
 ```
 
-Status (2026-10-14): 215 of the 360 frames labelled (95 visible), snapshot `labels_r2.csv`. Current model `models/vulva_seg_r2.pth` (IR only; Mac only): CV by sow F1 0.75 for visible-or-not, IoU 0.65. The IR + depth variant (r2d) scored lower (F1 0.69, IoU 0.55), so depth stays a labelling aid, not a model input, for now. Details in CHANGELOG.md. Before that, r1 (105 labels, `models/vulva_seg_r1.pth`): F1 0.71, IoU 0.59, mostly false positives on the anus, feces and dark marks.
+Status (2026-10-14): 215 of the 360 frames labelled (95 visible), snapshot `labels_r2.csv`. Current model `models/vulva_seg_r2.pth` (IR only; Mac only): CV by sow F1 0.75 for visible-or-not, IoU 0.65. The IR + depth variant (r2d) scored lower (F1 0.69, IoU 0.55), so depth stays a labelling aid, not a model input, for now. Details in CHANGELOG.md. Before that, r1 (105 labels, `models/vulva_seg_r1.pth`): F1 0.71, IoU 0.59, mostly false positives on the anus, feces and dark marks. r3 (2026-10-24, 218 labels, 100 epochs, lab PC) scored the same as r2 (F1 0.76, IoU 0.64), so longer training does not help; more labels should.
 
 ### Next
 
