@@ -9,8 +9,11 @@ body surface, red = sticks out). Click on any of the three; the views zoom
 together. --no-depth shows the IR image alone.
 
 If the set has colour images (export_label_set.py --rgb / --add-rgb), the
-aligned RGB is a fourth clickable panel; plain RGB from the separate colour
-camera is not pixel-aligned, so it is shown whole, for reference. --no-rgb hides it.
+aligned RGB is a fourth clickable panel. Plain RGB from the separate colour
+camera is not pixel-aligned: it is shown for reference, cropped to roughly the
+same area with an approximate map (--rgb-map, fitted by hand on the stall bars
+and anus of three Feb 6-7 frames; off by up to ~30 IR pixels because of
+parallax), and it zooms with the others. --no-rgb hides it.
 
     click 1  top end of the vulva       (the view then zooms in below it; --zoom 0 turns that off)
     click 2  bottom end
@@ -154,6 +157,9 @@ def main():
                     help="with --model: least certain frames first (max probability closest to the threshold)")
     ap.add_argument("--no-depth", action="store_true", help="IR image only (no 3D shading / height panels)")
     ap.add_argument("--no-rgb", action="store_true", help="hide the colour image even if the set has one")
+    ap.add_argument("--rgb-map", default="1.69,30,-12",
+                    help="approximate ToF-pixel -> RGB-pixel map for 1280x800 RGB: scale,dx,dy (used to show "
+                         "the same area of the unaligned RGB image)")
     ap.add_argument("--height-span", type=float, default=8.0, help="height colour scale, +/- mm")
     args = ap.parse_args()
 
@@ -210,6 +216,17 @@ def main():
     ax = axes[0]
     fig.canvas.manager.set_window_title("PAAL vulva labelling")
     view_cache = {}
+
+    rgb_s, rgb_dx, rgb_dy = (float(v) for v in args.rgb_map.split(","))
+
+    def to_rgb_box(x0, x1, y0, y1, w, h, pad=0.25):
+        """ToF-pixel box -> RGB-pixel limits (the RGB camera is not calibrated, so the box is
+        widened by `pad` on each side to keep the same area in view)."""
+        kx, ky = w / 1280.0, h / 800.0
+        X0, X1 = (rgb_s * x0 + rgb_dx) * kx, (rgb_s * x1 + rgb_dx) * kx
+        Y0, Y1 = (rgb_s * y0 + rgb_dy) * ky, (rgb_s * y1 + rgb_dy) * ky
+        px, py = pad * (X1 - X0), pad * (Y1 - Y0)
+        return max(0, X0 - px), min(w, X1 + px), min(h, Y1 + py), max(0, Y0 - py)
 
     def read_rgb(rel, aligned):
         if not rel:
@@ -287,7 +304,16 @@ def main():
             rgb = read_rgb(fr.get("rgb_path", ""), False)
             if rgb is not None:
                 ref_ax.imshow(rgb)
-                ref_ax.set_title("RGB (separate camera, reference only)", fontsize=9)
+                ref_ax.set_title("RGB (separate camera, approx. same area)", fontsize=9)
+                h, w = rgb.shape[:2]
+                if state["clicks"] and args.zoom:
+                    x, y = state["clicks"][0]
+                    z = args.zoom
+                    bx = to_rgb_box(x - z, x + z, y - 0.4 * z, y + 2.0 * z, w, h, pad=0.3)
+                else:
+                    bx = to_rgb_box(CROP[0], CROP[2], CROP[1], CROP[3], w, h, pad=0.05)
+                ref_ax.set_xlim(bx[0], bx[1])
+                ref_ax.set_ylim(bx[2], bx[3])
             else:
                 ref_ax.set_title("RGB (none for this frame)", fontsize=9)
             ref_ax.set_xticks([])
