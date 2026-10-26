@@ -244,12 +244,17 @@ def test_train_and_run_end_to_end():
         assert "24 labelled frames (16 present, 8 absent)" in out.stdout, out.stdout
 
         model = os.path.join(tmp, "models", "vulva_seg.pth")
+        share = os.path.join(tmp, "share")
+        os.makedirs(share)
         out = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels", labels, "--folds", "2",
                               "--epochs", "4", "--no-pretrained", "--out-model", model,
-                              "--out-dir", os.path.join(tmp, "seg")], capture_output=True, text=True, cwd=tmp)
+                              "--out-dir", os.path.join(tmp, "seg"), "--copy-to", share],
+                             capture_output=True, text=True, cwd=tmp)
         assert out.returncode == 0, out.stderr[-2000:]
         assert os.path.exists(model) and "Cross-validation" in out.stdout
         assert os.path.exists(os.path.join(tmp, "seg", "seg_report.json"))
+        assert sorted(os.listdir(share)) == ["vulva_seg.pth", "vulva_seg_cv.csv", "vulva_seg_report.txt"]
+        out_train = out.stdout
 
         outdir = os.path.join(tmp, "out")
         out = subprocess.run([PY, os.path.join(ROOT, "vulva", "run_vulva.py"), pred_csv, "--model", model,
@@ -260,6 +265,10 @@ def test_train_and_run_end_to_end():
             rows = list(csv.DictReader(f))
         assert len(rows) == 24
         assert all(r["measure_status"] for r in rows)
+        assert "vulva_conf" in rows[0]
+        with open(os.path.join(tmp, "seg", "cv_predictions.csv")) as f:
+            assert f.readline().strip().endswith("peak_prob,blob_conf")
+        assert "With confidence cut" in out_train or "No confidence cut" in out_train
         assert os.path.exists(os.path.join(outdir, "vulva_daily.csv"))
         assert os.path.exists(os.path.join(outdir, "vulva_summary.json"))
         # IR + depth model: trains, records its inputs, and run_vulva feeds it depth
@@ -271,6 +280,7 @@ def test_train_and_run_end_to_end():
         assert "(inputs: ir+depth)" in out.stdout
         import torch
         assert torch.load(model_d, map_location="cpu", weights_only=False)["inputs"] == "ir+depth"
+        assert "presence_threshold" in torch.load(model, map_location="cpu", weights_only=False)
         out = subprocess.run([PY, os.path.join(ROOT, "vulva", "run_vulva.py"), pred_csv, "--model", model_d,
                               "--out-dir", os.path.join(tmp, "out_d"), "--min-frames", "1"],
                              capture_output=True, text=True, cwd=tmp)
@@ -306,6 +316,19 @@ def test_model_mask_to_clicks_round_trip():
         a = ellipse_mask(truth) > 0
         b = ellipse_mask(e) > 0
         assert (a & b).sum() / (a | b).sum() > 0.93, (ang, e)
+
+
+def test_presence_cut_reaches_target_precision():
+    """The 'vulva visible' cut is the lowest blob confidence whose precision reaches the target."""
+    from train_seg import pick_presence_cut
+    vis, none = np.ones((4, 4), np.uint8), np.zeros((4, 4), np.uint8)
+    items = [{"mask": vis}] * 7 + [{"mask": none}] * 4             # 7 real vulvas, 4 frames without
+    pred = [vis] * 6 + [none] + [vis] * 4                           # one missed, four false blobs
+    confs = [.9, .8, .7, .6, .5, .4, 0, .65, .45, .35, .3]
+    assert pick_presence_cut(items, pred, confs, 0.8) == 0.5        # 5 real, 1 false kept
+    assert pick_presence_cut(items, pred, confs, 1.0) == 0.7
+    assert pick_presence_cut(items, pred, confs, 0) == 0.0
+    assert pick_presence_cut(items, pred, [.1] * 6 + [0] + [.95] * 4, 0.9) is None
 
 
 def test_depth_input_stack():

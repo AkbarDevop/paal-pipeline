@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Train the vulva segmentation U-Net, with cross-validation grouped by sow.
+r"""Train the vulva segmentation U-Net, with cross-validation grouped by sow.
 
 1. K-fold CV where every sow's frames sit in one fold only. The out-of-fold
    predictions give honest numbers on sows the model never saw:
      - presence (is a vulva visible?): precision, recall, F1, confusion matrix
      - mask quality on frames where both agree it is visible: IoU and Dice
      - mean |predicted - labelled| mask area
+   plus a confidence cut for "vulva visible" (mean probability inside the blob) set so
+   out-of-fold precision reaches --presence-precision: a frame without a visible vulva
+   that is called visible adds a wrong size to that sow's day, while a few dropped real
+   frames cost little (each sow has many standing frames a day).
 2. A final model trained on all labelled frames -> models/vulva_seg.pth.
 
 Usage:
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv --folds 5 --epochs 60
     python vulva/train_seg.py --labels <label set>/labels.csv --inputs ir+depth   # IR + height + shading
+    # lab PC: --copy-to also puts the model, report and per-frame CV file on the Mac share when done
+    python vulva\train_seg.py --labels \\tsclient\paal_exchange\vulva_label_set\labels_r4.csv --out-model models\vulva_seg_r5.pth --out-dir outputs\vulva_seg_r5 --copy-to \\tsclient\paal_exchange\vulva_label_set
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import json
 import math
 import os
 import random
+import shutil
 import sys
 import time
 
@@ -33,8 +40,8 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, largest_component, read_input,  # noqa: E402
-                       read_mask, save_checkpoint, to_model_space, to_tensor)
+from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, blob_confidence, largest_component,  # noqa: E402
+                       read_input, read_mask, save_checkpoint, to_model_space, to_tensor)
 
 MIN_AREA = 25    # model pixels; smaller blobs count as "no vulva"
 
@@ -171,6 +178,21 @@ def pick_threshold(items, probs, grid=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0
     return t, s, scored
 
 
+def pick_presence_cut(items, masks, confs, target=0.9):
+    """Lowest blob-confidence cut whose out-of-fold precision on "vulva visible" reaches target
+    (the lowest such cut keeps the most real frames). 0.0 = no cut; None = target not reachable."""
+    if target <= 0:
+        return 0.0
+    truth = [bool(it["mask"].any()) for it in items]
+    called = [bool(m.any()) for m in masks]
+    for c in sorted({round(float(x), 4) for x, v in zip(confs, called) if v}):
+        tp = sum(1 for t, v, x in zip(truth, called, confs) if t and v and x >= c)
+        fp = sum(1 for t, v, x in zip(truth, called, confs) if not t and v and x >= c)
+        if tp + fp and tp / (tp + fp) >= target:
+            return c
+    return None
+
+
 def score(items, preds):
     tp = fp = fn = tn = 0
     ious, dices, area_err = [], [], []
@@ -212,9 +234,14 @@ def main():
                     help="BCE weight on vulva pixels; above 1 grows masks (Dice already handles imbalance)")
     ap.add_argument("--inputs", choices=INPUTS, default="ir",
                     help='"ir" or "ir+depth" (IR, height above the skin and 3D shading as the 3 channels)')
+    ap.add_argument("--presence-precision", type=float, default=0.9,
+                    help="tune the 'vulva visible' confidence cut to this out-of-fold precision (0 = no cut)")
     ap.add_argument("--no-pretrained", action="store_true", help="random init (tests / offline)")
     ap.add_argument("--out-model", default=os.path.join("models", "vulva_seg.pth"))
     ap.add_argument("--out-dir", default=os.path.join("outputs", "vulva_seg"))
+    ap.add_argument("--copy-to", default="",
+                    help="also copy <model>.pth, <model>_report.txt and <model>_cv.csv here when done "
+                         "(e.g. \\\\tsclient\\paal_exchange\\vulva_label_set; PowerShell copy is refused there)")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -273,23 +300,44 @@ def main():
         log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
         log(f"  Mask on frames both call visible: IoU {overall['iou_mean']}, Dice {overall['dice_mean']}, "
             f"area error {overall['area_error_mean']}")
+        peaks = [float(p.max()) for p in oof_probs]
+        confs = [blob_confidence(p, m) for p, m in zip(oof_probs, oof)]
+        presence = pick_presence_cut(items, oof, confs, args.presence_precision)
+        if presence is None:
+            log(f"  No confidence cut reaches precision {args.presence_precision}; using none")
+            presence = 0.0
+        kept = [m if c >= presence else np.zeros_like(m) for m, c in zip(oof, confs)]
+        cut = score(items, kept)
+        report["cv"]["presence_cut"] = {"score": "mean prob in blob", "threshold": presence,
+                                        "target_precision": args.presence_precision, "overall": cut}
+        c = cut["confusion"]
+        spec = c["tn"] / max(c["tn"] + c["fp"], 1)
+        log(f"With confidence cut {presence} (target precision {args.presence_precision}; used by run_vulva):")
+        log(f"  Vulva visible: precision {cut['presence_precision']}, recall {cut['presence_recall']}, "
+            f"specificity {spec:.3f}, F1 {cut['presence_f1']}")
+        log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
+        log(f"  Mask on frames both call visible: IoU {cut['iou_mean']}, Dice {cut['dice_mean']}, "
+            f"area error {cut['area_error_mean']}")
         with open(os.path.join(args.out_dir, "cv_predictions.csv"), "w", newline="") as f:
             w = csv.writer(f)
             # per frame, so results can be split later (e.g. hand-drawn vs accepted model suggestions)
+            # pred_area_px / iou are before the confidence cut; peak_prob and blob_conf let it be re-tuned
             w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "fold",
-                        "pred_area_px", "true_area_px", "iou"])
-            for it, p in zip(items, oof):
+                        "pred_area_px", "true_area_px", "iou", "peak_prob", "blob_conf"])
+            for it, p, pk, cf in zip(items, oof, peaks, confs):
                 r = it["row"]
                 t, q = it["mask"].astype(bool), p.astype(bool)
                 iou = round(float((t & q).sum() / (t | q).sum()), 4) if (t.any() and q.any()) else ""
                 w.writerow([r["timestamp_folder"], r["pig_id"], r["pig_timestamp"], r["label"], r.get("how", ""),
-                            folds[it["pig_id"]], int(p.sum()), int(it["mask"].sum()), iou])
+                            folds[it["pig_id"]], int(p.sum()), int(it["mask"].sum()), iou,
+                            round(pk, 4), round(cf, 4)])
     else:
-        threshold = 0.5
+        threshold, presence = 0.5, 0.0
     log("")
     log(f"Final model on all {len(items)} frames ...")
     model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log, args.pos_weight)
     save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold, "inputs": args.inputs,
+                                            "presence_threshold": presence,
                                             "trained_on": len(items), "sows": pigs,
                                             "date": time.strftime("%Y-%m-%d")})
     log(f"Saved {args.out_model}  ({time.time() - t0:.0f} s)")
@@ -298,6 +346,24 @@ def main():
         json.dump(report, f, indent=2)
     with open(os.path.join(args.out_dir, "seg_report.txt"), "w") as f:
         f.write("\n".join(log_lines) + "\n")
+    if args.copy_to:
+        copy_results(args.out_model, args.out_dir, args.copy_to)
+
+
+def copy_results(model_path, out_dir, dest):
+    """Plain read/write copy (Windows CopyFile, used by PowerShell copy, is refused on \\\\tsclient shares).
+    A failed copy only prints a warning: the local files stay."""
+    stem = os.path.splitext(os.path.basename(model_path))[0]
+    for src, name in ((model_path, f"{stem}.pth"), (os.path.join(out_dir, "seg_report.txt"), f"{stem}_report.txt"),
+                      (os.path.join(out_dir, "cv_predictions.csv"), f"{stem}_cv.csv")):
+        if not os.path.exists(src):
+            continue
+        try:
+            with open(src, "rb") as fi, open(os.path.join(dest, name), "wb") as fo:
+                shutil.copyfileobj(fi, fo)
+            print(f"Copied {name} to {dest}")
+        except OSError as e:
+            print(f"Could not copy {name} to {dest}: {e} (kept in {os.path.dirname(src) or '.'})")
 
 
 if __name__ == "__main__":

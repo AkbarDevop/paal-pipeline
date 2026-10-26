@@ -192,10 +192,17 @@ def load_checkpoint(path, device="cpu"):
     return model, ckpt
 
 
+def blob_confidence(prob, mask):
+    """Mean probability inside the predicted blob (0 when there is none): how sure the
+    model is that the blob is a vulva. train_seg.py tunes a cut on it from held-out sows."""
+    return float(prob[mask > 0].astype(np.float32).mean()) if mask.any() else 0.0
+
+
 @torch.no_grad()
-def predict(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size=16):
+def predict(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size=16, presence=0.0):
     """Full-frame inputs (read_input / make_input; plain grey for "ir" models)
-    -> list of (full-frame mask uint8, max prob, area in model pixels)."""
+    -> list of (full-frame mask uint8, max prob, area in model pixels, blob confidence).
+    presence: blobs with a confidence below this are dropped (checkpoint "presence_threshold")."""
     out = []
     for i in range(0, len(grays), batch_size):
         chunk = grays[i:i + batch_size]
@@ -207,7 +214,10 @@ def predict(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size
             area = int(m.sum())
             if min_area is not None and area < min_area:
                 m[:] = 0
-            out.append((to_full_frame(m), float(p.max()), area))
+            conf = blob_confidence(p, m)
+            if conf < presence:
+                m[:] = 0
+            out.append((to_full_frame(m), float(p.max()), area, conf))
     return out
 
 

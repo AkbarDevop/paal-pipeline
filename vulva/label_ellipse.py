@@ -113,7 +113,7 @@ class Suggester:
             res = predict(self.model, [grays[j] for j in ok], self.device, self.thr, self.min_area) if ok else []
             for p in chunk:
                 self.cache[p] = (None, 0.0)
-            for j, (m, pmax, _area) in zip(ok, res):
+            for j, (m, pmax, *_rest) in zip(ok, res):
                 self.cache[chunk[j]] = (clicks_from_mask(m) if m.any() else None, pmax)
         return [self.cache[p] for p in paths]
 

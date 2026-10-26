@@ -37,7 +37,7 @@ from seg_model import ir_channel, load_checkpoint, predict, read_input  # noqa: 
 from select_frames import parse_windows, select  # noqa: E402
 
 FRAME_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence",
-                "vulva_visible", "vulva_prob", "mask_area_px"] + MEASURE_FIELDS + ["ir_path", "mask_path"]
+                "vulva_visible", "vulva_prob", "vulva_conf", "mask_area_px"] + MEASURE_FIELDS + ["ir_path", "mask_path"]
 
 
 def write_csv(rows, path, fields=None):
@@ -92,6 +92,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model, ckpt = load_checkpoint(args.model, device)
     thr, min_area = ckpt.get("threshold", 0.5), ckpt.get("min_area", 25)
+    presence = ckpt.get("presence_threshold", 0.0)   # models before r5 have none
     inputs = ckpt.get("inputs", "ir")
     K = load_intrinsics(args.calibration)
 
@@ -108,7 +109,7 @@ def main():
         chunk = cands[i:i + 64]
         grays = [read_input(c["ir_path"], c["depth_path"], inputs) for c in chunk]
         ok = [j for j, g in enumerate(grays) if g is not None]
-        res = predict(model, [grays[j] for j in ok], device, thr, min_area, args.batch_size)
+        res = predict(model, [grays[j] for j in ok], device, thr, min_area, args.batch_size, presence)
         res_by = dict(zip(ok, res))
         for j, c in enumerate(chunk):
             row = {k: c[k] for k in ("timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence", "ir_path")}
@@ -116,8 +117,9 @@ def main():
                 row.update({"vulva_visible": "", "measure_status": "unreadable_ir"})
                 rows.append(row)
                 continue
-            mask, prob, area = res_by[j]
-            row.update({"vulva_visible": int(mask.any()), "vulva_prob": round(prob, 4), "mask_area_px": area})
+            mask, prob, area, conf = res_by[j]
+            row.update({"vulva_visible": int(mask.any()), "vulva_prob": round(prob, 4),
+                        "vulva_conf": round(conf, 4), "mask_area_px": area})
             if mask.any():
                 m = measure(load_depth_raw(c["depth_path"]), mask, K)
                 row.update(m)
@@ -129,7 +131,7 @@ def main():
                     tiles.append(overlay_tile(ir_channel(grays[j]), mask, f"p{c['pig_id']} {c['pig_timestamp'][4:13]} "
                                               f"W{m['width_mm']:.0f} L{m['length_mm']:.0f}"))
             else:
-                row["measure_status"] = "not_visible"
+                row["measure_status"] = "low_confidence" if 0 < conf < presence else "not_visible"
             rows.append(row)
         print(f"  {min(i + 64, len(cands))}/{len(cands)} frames", flush=True)
 
@@ -143,10 +145,12 @@ def main():
 
     visible = sum(1 for r in rows if r.get("vulva_visible") == 1)
     good = sum(1 for r in rows if r.get("measure_status") == "ok")
-    summary = {"frames": len(rows), "visible": visible, "measured_ok": good, "sow_days": len(daily),
-               "model": args.model, "seconds": round(time.time() - t0, 1)}
-    print(f"Vulva visible in {visible} of {len(rows)} standing frames; measured {good}; "
-          f"{len(daily)} sow-days with at least {args.min_frames} good frames")
+    unsure = sum(1 for r in rows if r.get("measure_status") == "low_confidence")
+    summary = {"frames": len(rows), "visible": visible, "low_confidence": unsure, "measured_ok": good,
+               "sow_days": len(daily), "model": args.model, "presence_threshold": presence,
+               "seconds": round(time.time() - t0, 1)}
+    print(f"Vulva visible in {visible} of {len(rows)} standing frames ({unsure} more dropped as low confidence); "
+          f"measured {good}; {len(daily)} sow-days with at least {args.min_frames} good frames")
 
     if args.truth:
         with open(args.truth, newline="", encoding="utf-8-sig") as f:

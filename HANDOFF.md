@@ -216,7 +216,7 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 | `vulva/run_vulva.py` | Steps 1–4 in one command; writes `vulva_frames.csv`, `vulva_daily.csv`, `vulva_vs_caliper.csv`, `vulva_review.jpg`, `vulva_summary.json`. |
 | `vulva/repeatability.py` | Within-day SD, error vs calipers, frames needed per sow-day. |
 
-Checks: `python tests/test_vulva_pipeline.py` (13 synthetic tests, including a tiny train → run).
+Checks: `python tests/test_vulva_pipeline.py` (14 synthetic tests, including a tiny train → run).
 
 ### Labelling (the masks from the hand-crop work are not on the lab PC)
 
@@ -230,6 +230,9 @@ python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
 
 # train straight from the label set (paths in labels.csv are relative to its folder)
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv
+# lab PC (about 4x faster than the MacBook): --copy-to puts model, report and per-frame CV file on the Mac share.
+# PowerShell copy / Copy-Item gets "access denied" on \\tsclient; Python writes work.
+python vulva\train_seg.py --labels \\tsclient\paal_exchange\vulva_label_set\labels_r4.csv --out-model models\vulva_seg_r5.pth --out-dir outputs\vulva_seg_r5 --copy-to \\tsclient\paal_exchange\vulva_label_set
 # same, with depth as extra input channels (height above the skin + 3D shading)
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv --inputs ir+depth
 
@@ -238,16 +241,17 @@ python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/lab
 python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --add-rgb
 
 # after a first model: it suggests each ellipse (Enter accept, n agree, click to redo), hardest frames first
-python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r2.pth --hard-first
+python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r4.pth --hard-first
 ```
 
-Status (2026-10-14): 215 of the 360 frames labelled (95 visible), snapshot `labels_r2.csv`. Current model `models/vulva_seg_r2.pth` (IR only; Mac only): CV by sow F1 0.75 for visible-or-not, IoU 0.65. The IR + depth variant (r2d) scored lower (F1 0.69, IoU 0.55), so depth stays a labelling aid, not a model input, for now. Details in CHANGELOG.md. Before that, r1 (105 labels, `models/vulva_seg_r1.pth`): F1 0.71, IoU 0.59, mostly false positives on the anus, feces and dark marks. r3 (2026-10-24, 218 labels, 100 epochs, lab PC) scored the same as r2 (F1 0.76, IoU 0.64), so longer training does not help; more labels should.
+Status (2026-10-26): all 360 Feb 6–11 frames labelled (234 visible), snapshot `labels_r4.csv`. Current model `models/vulva_seg_r4.pth` (IR only; Mac and lab PC). CV by sow: F1 0.88 and IoU 0.76 overall, but the fairer numbers are on the 161 human-drawn labels (the rest are model outlines accepted as drawn): F1 0.76, IoU 0.70, sizes unbiased (median predicted / labelled area 0.99). Its weak spot is calling a vulva visible on about half of the frames without one; `train_seg.py` now tunes a confidence cut for that (needs one retrain, r5). History: r1 (105 labels) F1 0.71, IoU 0.59; r2 (215) F1 0.75, IoU 0.65, drew about 10% small; r3 (r2's labels, 100 epochs) same as r2, so more labels help and longer training does not; IR + depth input (r2d) scored lower, so depth stays a labelling aid. Details in CHANGELOG.md.
 
 ### Next
 
-1. Finish the last 145 Feb 6–11 frames with `--model models/vulva_seg_r2.pth` (mostly clean views the model already outlines), retrain on all 360 (r3), compare with r2 on the same folds.
+1. Retrain on the same 360 labels with the confidence cut (r5, lab PC, about 25 min, command above) and check how many real frames the cut costs.
 2. Run `run_vulva.py` on all standing frames and compare the daily values with `Feb_2026.xlsx` (`truth.py`).
 3. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
+4. More labels from other days (Feb 12–17, after posture runs there), drawn or corrected by hand rather than accepted, plus the two sliver labels noted in CHANGELOG.md.
 
 ### Heat detection groundwork (`estrus/`)
 
