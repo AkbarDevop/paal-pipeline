@@ -146,6 +146,8 @@ def test_select_frames_standing_windows_and_cap():
     assert picked[0]["depth_path"].endswith("pig0_depth_20260211-06-00-10.raw")
     capped = select(rows, max_per_day=4)
     assert len(capped) == 8 and len({p["pig_timestamp"] for p in capped if p["pig_id"] == 0}) == 4
+    one = select(rows, max_per_day=1)                   # 12 standing hours: the middle one, not the first
+    assert [p["pig_timestamp"][9:11] for p in one if p["pig_id"] == 0] == ["12"]
 
 
 def test_daily_median_baseline_and_caliper_join():
@@ -449,6 +451,54 @@ def test_export_label_set_and_train_on_relative_paths():
                         "timestamp_folder": rows[1]["timestamp_folder"], "pig_timestamp": rows[1]["pig_timestamp"]})
         items = load_labels(os.path.join(out, "labels.csv"))
         assert len(items) == 2 and items[0]["mask"].any() and not items[1]["mask"].any()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_eval_seg_scores_a_model_end_to_end():
+    """eval_seg.py: a model against hand labels it was not trained on, with sizes in mm from both masks."""
+    from eval_seg import evaluate, read_rows, summarise
+    from seg_model import VulvaUNet
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(7)
+        folder = os.path.join(tmp, "set", "20260213-09-00-00")
+        os.makedirs(folder)
+        os.makedirs(os.path.join(tmp, "set", "masks"))
+        rows = []
+        for pid in range(4):
+            ts = f"20260213-09-00-{10 + pid:02d}"
+            present = pid < 3
+            m = _write_frame(folder, pid, ts, present, rng)
+            mp = ""
+            if present:
+                mp = f"masks/{pid}.png"
+                cv2.imwrite(os.path.join(tmp, "set", mp), m.astype(np.uint8) * 255)
+            rows.append({"ir_path": f"20260213-09-00-00/pig{pid}_ir_vis_{ts}.jpg", "mask_path": mp,
+                         "label": "present" if present else "absent", "pig_id": pid,
+                         "timestamp_folder": "20260213-09-00-00", "pig_timestamp": ts, "how": "hand"})
+        labels = os.path.join(tmp, "set", "labels.csv")
+        with open(labels, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        model = VulvaUNet(pretrained=False).eval()
+        ckpt = {"threshold": 0.5, "min_area": 25, "presence_threshold": 0.0, "inputs": "ir"}
+        frames = evaluate(model, ckpt, read_rows(labels), "cpu")
+        assert len(frames) == 4 and {f["verdict"] for f in frames} <= {
+            "false alarm", "missed", "dropped by cut", "both visible", "both not visible"}
+        assert all(f["human_status"] == "ok" for f in frames if f["label"] == "present")
+        assert abs(float(frames[0]["human_width_mm"]) - 40) < 8          # hand mask measured on the depth
+        report = summarise(frames, 0.0)
+        assert report[0].startswith("4 labelled frames: 3 with a visible vulva, 1 without")
+        from seg_model import save_checkpoint
+        ck = os.path.join(tmp, "m.pth")
+        save_checkpoint(model, ck, ckpt)
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "eval_seg.py"), "--model", ck, "--labels", labels,
+                              "--out-dir", os.path.join(tmp, "ev")], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert all(os.path.exists(os.path.join(tmp, "ev", n)) for n in ("eval_report.txt", "eval_frames.csv",
+                                                                         "eval_sheet.jpg"))
     finally:
         shutil.rmtree(tmp)
 

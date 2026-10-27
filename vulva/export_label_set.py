@@ -17,6 +17,9 @@ Usage (lab PC, copying to the Mac through the Remote Desktop share):
     python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set ^
         --windows 06:00-11:00,14:00-18:00 --per-day 3
     python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --add-rgb
+    # test set for eval_seg.py: new days, 2 per sow-day spread over the whole day, labelled without --model
+    python vulva/export_label_set.py outputs\gt_feb12\predictions.csv \\tsclient\paal_exchange\vulva_test_feb12 ^
+        --dates 20260212,20260213,20260214,20260215 --per-day 2 --windows 00:00-23:59 --rgb
 """
 
 from __future__ import annotations

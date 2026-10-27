@@ -78,9 +78,9 @@ def select(pred_rows, min_conf=0.6, windows=None, max_per_day=0):
         thinned = []
         for rs in by.values():
             rs.sort(key=lambda p: p["pig_timestamp"])
-            if len(rs) > max_per_day:        # spread over the day, not the first N
+            if len(rs) > max_per_day:        # spread over the day, centred (1 per day = the middle one)
                 step = len(rs) / max_per_day
-                rs = [rs[int(i * step)] for i in range(max_per_day)]
+                rs = [rs[int((i + 0.5) * step)] for i in range(max_per_day)]
             thinned.extend(rs)
         picked = thinned
     return sorted(picked, key=lambda p: (p["timestamp_folder"], p["pig_id"]))
