@@ -249,7 +249,7 @@ Status (2026-10-26): all 360 Feb 6–11 frames labelled (234 visible), snapshot 
 
 ### Next
 
-1. Download `Feb_2026.xlsx`, run posture on Feb 12–17, then `run_vulva.py --model models/vulva_seg_r5.pth` on all Feb 6–17 standing frames and compare the daily values with the calipers (`truth.py`), including whether heat days lose more frames to the cut.
+1. Done 2026-10-26: posture on Feb 12–17 (`outputs\gt_feb12`) and `run_vulva.py --model models\vulva_seg_r5.pth` on Feb 6–17 (`outputs\vulva_r5_feb06_17` on the lab PC, copied to the Mac). First look in CHANGELOG.md: volume peaks on Feb 10, W × L does not rise. Still to do: download `Feb_2026.xlsx`, run `truth.py`, and compare each sow's daily values with her calipers and heat days, including whether her heat days lose more frames to the cut.
 2. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
 3. More labels from other days and other pig groups (new sows matter most), drawn or corrected by hand rather than accepted; the least confident frames of the Feb 6–17 run are the ones to label. Also redraw the two sliver labels noted in CHANGELOG.md.
 4. Keep the label set on the lab PC's own disk (`robocopy \\tsclient\paal_exchange\vulva_label_set C:\Users\aakdbx\vulva_label_set /E`) so training does not need the Mac awake.
