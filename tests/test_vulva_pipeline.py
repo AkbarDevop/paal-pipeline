@@ -254,6 +254,16 @@ def test_train_and_run_end_to_end():
         assert os.path.exists(model) and "Cross-validation" in out.stdout
         assert os.path.exists(os.path.join(tmp, "seg", "seg_report.json"))
         assert sorted(os.listdir(share)) == ["vulva_seg.pth", "vulva_seg_cv.csv", "vulva_seg_report.txt"]
+        # --jobs: folds and final model as parallel workers, same outputs
+        model_p = os.path.join(tmp, "models", "vulva_seg_par.pth")
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels", labels, "--folds", "2",
+                              "--epochs", "3", "--no-pretrained", "--jobs", "3", "--out-model", model_p,
+                              "--out-dir", os.path.join(tmp, "seg_par")], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+        assert "All 3 models trained" in out.stdout and "Cross-validation" in out.stdout, out.stdout
+        assert os.path.exists(model_p)
+        with open(os.path.join(tmp, "seg_par", "cv_predictions.csv")) as f:
+            assert len(list(csv.DictReader(f))) == 24
         out_train = out.stdout
 
         outdir = os.path.join(tmp, "out")

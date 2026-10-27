@@ -230,9 +230,10 @@ python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
 
 # train straight from the label set (paths in labels.csv are relative to its folder)
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv
-# lab PC (about 4x faster than the MacBook): --copy-to puts model, report and per-frame CV file on the Mac share.
-# PowerShell copy / Copy-Item gets "access denied" on \\tsclient; Python writes work.
-python vulva\train_seg.py --labels \\tsclient\paal_exchange\vulva_label_set\labels_r4.csv --out-model models\vulva_seg_r5.pth --out-dir outputs\vulva_seg_r5 --copy-to \\tsclient\paal_exchange\vulva_label_set
+# lab PC: --jobs 6 trains the 5 folds and the final model at once on the two GPUs; --copy-to puts model,
+# report and per-frame CV file on the Mac share (PowerShell copy gets "access denied" on \\tsclient; Python
+# writes work while the Mac is awake). Labels from a local copy of the set, so the Mac is only needed for --copy-to.
+python vulva\train_seg.py --labels C:\Users\aakdbx\vulva_label_set\labels_r4.csv --jobs 6 --out-model models\vulva_seg_r6.pth --out-dir outputs\vulva_seg_r6 --copy-to \\tsclient\paal_exchange\vulva_label_set
 # same, with depth as extra input channels (height above the skin + 3D shading)
 python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/labels.csv --inputs ir+depth
 
@@ -241,17 +242,17 @@ python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/lab
 python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --add-rgb
 
 # after a first model: it suggests each ellipse (Enter accept, n agree, click to redo), hardest frames first
-python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r4.pth --hard-first
+python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r5.pth --hard-first
 ```
 
-Status (2026-10-26): all 360 Feb 6–11 frames labelled (234 visible), snapshot `labels_r4.csv`. Current model `models/vulva_seg_r4.pth` (IR only; Mac and lab PC). CV by sow: F1 0.88 and IoU 0.76 overall, but the fairer numbers are on the 161 human-drawn labels (the rest are model outlines accepted as drawn): F1 0.76, IoU 0.70, sizes unbiased (median predicted / labelled area 0.99). Its weak spot is calling a vulva visible on about half of the frames without one; `train_seg.py` now tunes a confidence cut for that (needs one retrain, r5). History: r1 (105 labels) F1 0.71, IoU 0.59; r2 (215) F1 0.75, IoU 0.65, drew about 10% small; r3 (r2's labels, 100 epochs) same as r2, so more labels help and longer training does not; IR + depth input (r2d) scored lower, so depth stays a labelling aid. Details in CHANGELOG.md.
+Status (2026-10-26): all 360 Feb 6–11 frames labelled (234 visible), snapshot `labels_r4.csv`. Current model `models/vulva_seg_r5.pth` (IR only; Mac and lab PC), which carries a confidence cut for "vulva visible". CV by sow at that cut: precision 0.90, recall 0.86, IoU 0.79 overall; on the 161 human-drawn labels (the rest are model outlines accepted as drawn) precision 0.75, recall 0.67, IoU 0.72. Sizes are unbiased. The cut drops large vulvas more often than small ones, so check heat days in the caliper comparison. History: r1 (105 labels) F1 0.71, IoU 0.59; r2 (215) F1 0.75, IoU 0.65, drew about 10% small; r3 (r2's labels, 100 epochs) same as r2, so more labels help and longer training does not; r4 (360) like r5 without the cut, calling a vulva visible on about half the hard frames without one; IR + depth input (r2d) scored lower, so depth stays a labelling aid. Details in CHANGELOG.md.
 
 ### Next
 
-1. Retrain on the same 360 labels with the confidence cut (r5, lab PC, about 25 min, command above) and check how many real frames the cut costs.
-2. Run `run_vulva.py` on all standing frames and compare the daily values with `Feb_2026.xlsx` (`truth.py`).
-3. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
-4. More labels from other days (Feb 12–17, after posture runs there), drawn or corrected by hand rather than accepted, plus the two sliver labels noted in CHANGELOG.md.
+1. Download `Feb_2026.xlsx`, run posture on Feb 12–17, then `run_vulva.py --model models/vulva_seg_r5.pth` on all Feb 6–17 standing frames and compare the daily values with the calipers (`truth.py`), including whether heat days lose more frames to the cut.
+2. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
+3. More labels from other days and other pig groups (new sows matter most), drawn or corrected by hand rather than accepted; the least confident frames of the Feb 6–17 run are the ones to label. Also redraw the two sliver labels noted in CHANGELOG.md.
+4. Keep the label set on the lab PC's own disk (`robocopy \\tsclient\paal_exchange\vulva_label_set C:\Users\aakdbx\vulva_label_set /E`) so training does not need the Mac awake.
 
 ### Heat detection groundwork (`estrus/`)
 

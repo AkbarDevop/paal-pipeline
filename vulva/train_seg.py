@@ -16,8 +16,9 @@ Usage:
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv --folds 5 --epochs 60
     python vulva/train_seg.py --labels <label set>/labels.csv --inputs ir+depth   # IR + height + shading
-    # lab PC: --copy-to also puts the model, report and per-frame CV file on the Mac share when done
-    python vulva\train_seg.py --labels \\tsclient\paal_exchange\vulva_label_set\labels_r4.csv --out-model models\vulva_seg_r5.pth --out-dir outputs\vulva_seg_r5 --copy-to \\tsclient\paal_exchange\vulva_label_set
+    # lab PC: --jobs 6 trains the 5 folds and the final model at the same time (split over the GPUs);
+    # --copy-to also puts the model, report and per-frame CV file on the Mac share when done
+    python vulva\train_seg.py --jobs 6 --labels \\tsclient\paal_exchange\vulva_label_set\labels_r4.csv --out-model models\vulva_seg_r5.pth --out-dir outputs\vulva_seg_r5 --copy-to \\tsclient\paal_exchange\vulva_label_set
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import math
 import os
 import random
 import shutil
+import subprocess
 import sys
 import time
 
@@ -242,8 +244,15 @@ def main():
     ap.add_argument("--copy-to", default="",
                     help="also copy <model>.pth, <model>_report.txt and <model>_cv.csv here when done "
                          "(e.g. \\\\tsclient\\paal_exchange\\vulva_label_set; PowerShell copy is refused there)")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="train the CV folds and the final model in this many processes at once "
+                         "(GPUs shared round-robin; 6 = all at once for 5 folds; lab PC only, at most 2 without CUDA)")
+    ap.add_argument("--job", type=int, default=None, help=argparse.SUPPRESS)       # worker: fold k, or folds = final
+    ap.add_argument("--job-dir", default="", help=argparse.SUPPRESS)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+    if args.job is not None:
+        return run_job(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -270,72 +279,38 @@ def main():
     if args.folds and len(pigs) >= args.folds:
         folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
         report["folds"] = {str(k): sorted(p for p, f in folds.items() if f == k) for k in range(args.folds)}
-        oof = [None] * len(items)
-        oof_probs = [None] * len(items)
-        per_fold = []
-        for k in range(args.folds):
-            tr = [it for it in items if folds[it["pig_id"]] != k]
-            te_idx = [i for i, it in enumerate(items) if folds[it["pig_id"]] == k]
-            log(f"Fold {k + 1}/{args.folds}: test sows {report['folds'][str(k)]} "
-                f"({len(te_idx)} frames, train {len(tr)})")
-            model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log, args.pos_weight)
-            probs = predict_probs(model, [items[i] for i in te_idx], device)
-            preds = masks_from_probs(probs, 0.5)
-            for i, p, pr in zip(te_idx, preds, probs):
-                oof[i] = p
-                oof_probs[i] = pr
-            s = score([items[i] for i in te_idx], preds)
-            per_fold.append(s)
-            log(f"    presence F1 {s['presence_f1']}  IoU {s['iou_mean']}  Dice {s['dice_mean']}")
-        threshold, overall, by_thr = pick_threshold(items, oof_probs)
-        oof = masks_from_probs(oof_probs, threshold)
-        report["cv"] = {"overall": overall, "per_fold_at_0.5": per_fold, "threshold": threshold,
-                        "by_threshold": {str(t): {k: s[k] for k in ("presence_f1", "iou_mean", "area_error_mean")}
-                                         for t, s in by_thr}}
-        c = overall["confusion"]
-        log("")
-        log(f"Cross-validation (sows held out), {overall['frames']} frames, mask threshold {threshold}:")
-        log(f"  Vulva visible: precision {overall['presence_precision']}, recall {overall['presence_recall']}, "
-            f"F1 {overall['presence_f1']}, accuracy {overall['presence_accuracy']}")
-        log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
-        log(f"  Mask on frames both call visible: IoU {overall['iou_mean']}, Dice {overall['dice_mean']}, "
-            f"area error {overall['area_error_mean']}")
-        peaks = [float(p.max()) for p in oof_probs]
-        confs = [blob_confidence(p, m) for p, m in zip(oof_probs, oof)]
-        presence = pick_presence_cut(items, oof, confs, args.presence_precision)
-        if presence is None:
-            log(f"  No confidence cut reaches precision {args.presence_precision}; using none")
-            presence = 0.0
-        kept = [m if c >= presence else np.zeros_like(m) for m, c in zip(oof, confs)]
-        cut = score(items, kept)
-        report["cv"]["presence_cut"] = {"score": "mean prob in blob", "threshold": presence,
-                                        "target_precision": args.presence_precision, "overall": cut}
-        c = cut["confusion"]
-        spec = c["tn"] / max(c["tn"] + c["fp"], 1)
-        log(f"With confidence cut {presence} (target precision {args.presence_precision}; used by run_vulva):")
-        log(f"  Vulva visible: precision {cut['presence_precision']}, recall {cut['presence_recall']}, "
-            f"specificity {spec:.3f}, F1 {cut['presence_f1']}")
-        log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
-        log(f"  Mask on frames both call visible: IoU {cut['iou_mean']}, Dice {cut['dice_mean']}, "
-            f"area error {cut['area_error_mean']}")
-        with open(os.path.join(args.out_dir, "cv_predictions.csv"), "w", newline="") as f:
-            w = csv.writer(f)
-            # per frame, so results can be split later (e.g. hand-drawn vs accepted model suggestions)
-            # pred_area_px / iou are before the confidence cut; peak_prob and blob_conf let it be re-tuned
-            w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "fold",
-                        "pred_area_px", "true_area_px", "iou", "peak_prob", "blob_conf"])
-            for it, p, pk, cf in zip(items, oof, peaks, confs):
-                r = it["row"]
-                t, q = it["mask"].astype(bool), p.astype(bool)
-                iou = round(float((t & q).sum() / (t | q).sum()), 4) if (t.any() and q.any()) else ""
-                w.writerow([r["timestamp_folder"], r["pig_id"], r["pig_timestamp"], r["label"], r.get("how", ""),
-                            folds[it["pig_id"]], int(p.sum()), int(it["mask"].sum()), iou,
-                            round(pk, 4), round(cf, 4)])
+        if args.jobs > 2 and not torch.cuda.is_available():
+            # each worker holds its own copy of the frames and the model: a laptop runs out of memory and disk (swap)
+            log(f"--jobs {args.jobs} needs CUDA GPUs; using 2 at a time here")
+            args.jobs = 2
+        if args.jobs > 1:
+            oof_probs, per_fold, final_state = run_parallel(args, items, folds, report, log)
+        else:
+            oof_probs, per_fold = [None] * len(items), []
+            for k in range(args.folds):
+                tr = [it for it in items if folds[it["pig_id"]] != k]
+                te_idx = [i for i, it in enumerate(items) if folds[it["pig_id"]] == k]
+                log(f"Fold {k + 1}/{args.folds}: test sows {report['folds'][str(k)]} "
+                    f"({len(te_idx)} frames, train {len(tr)})")
+                model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
+                                    args.pos_weight)
+                probs = predict_probs(model, [items[i] for i in te_idx], device)
+                for i, pr in zip(te_idx, probs):
+                    oof_probs[i] = pr
+                s = score([items[i] for i in te_idx], masks_from_probs(probs, 0.5))
+                per_fold.append(s)
+                log(f"    presence F1 {s['presence_f1']}  IoU {s['iou_mean']}  Dice {s['dice_mean']}")
+        threshold, presence = finish_cv(args, items, folds, oof_probs, per_fold, report, log)
     else:
         threshold, presence = 0.5, 0.0
     log("")
     log(f"Final model on all {len(items)} frames ...")
-    model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log, args.pos_weight)
+    if args.jobs > 1 and args.folds and len(pigs) >= args.folds:
+        model = VulvaUNet(pretrained=False)
+        model.load_state_dict(final_state)
+    else:
+        model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
+                            args.pos_weight)
     save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold, "inputs": args.inputs,
                                             "presence_threshold": presence,
                                             "trained_on": len(items), "sows": pigs,
@@ -349,6 +324,152 @@ def main():
     if args.copy_to:
         copy_results(args.out_model, args.out_dir, args.copy_to)
 
+
+
+def run_job(args):
+    """Worker for --jobs: train CV fold args.job (or, when args.job == args.folds, the final model
+    on all frames) and save the held-out probabilities / the weights into args.job_dir."""
+    k = args.job
+    seed = args.seed + 1 + k
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+    log = lambda s: print(s, flush=True)  # noqa: E731
+    items = load_labels(args.labels, args.inputs)
+    if k == args.folds:
+        log(f"Final model on all {len(items)} frames ({device})")
+        model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
+                            args.pos_weight)
+        torch.save(model.state_dict(), os.path.join(args.job_dir, "final.pt"))
+        return
+    folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
+    tr = [it for it in items if folds[it["pig_id"]] != k]
+    te = [it for it in items if folds[it["pig_id"]] == k]
+    log(f"Fold {k + 1}/{args.folds}: {len(te)} test frames, train {len(tr)} ({device})")
+    model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
+                        args.pos_weight)
+    probs = predict_probs(model, te, device)
+    np.savez(os.path.join(args.job_dir, f"fold{k}.npz"), keys=np.array([it["row"]["ir_path"] for it in te]),
+             probs=np.stack(probs))
+
+
+def run_parallel(args, items, folds, report, log):
+    """--jobs N: the CV folds and the final model are independent, so train them as separate
+    processes, N at a time, each on the next GPU. Progress is printed as one line per change;
+    each worker's own log is in <out-dir>/jobs/."""
+    job_dir = os.path.join(args.out_dir, "jobs")
+    os.makedirs(job_dir, exist_ok=True)
+    for f in os.listdir(job_dir):
+        if f.endswith((".npz", ".pt", ".log")):
+            os.remove(os.path.join(job_dir, f))
+    cmd = [sys.executable, os.path.abspath(__file__), "--labels", args.labels, "--folds", str(args.folds),
+           "--epochs", str(args.epochs), "--batch-size", str(args.batch_size), "--lr", str(args.lr),
+           "--pos-weight", str(args.pos_weight), "--inputs", args.inputs, "--seed", str(args.seed),
+           "--job-dir", job_dir] + (["--no-pretrained"] if args.no_pretrained else [])
+    n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    names = {k: f"fold{k + 1}" for k in range(args.folds)}
+    names[args.folds] = "final"
+    todo, running, state = list(range(args.folds + 1)), {}, {}
+    log(f"Training {len(todo)} models ({args.folds} folds + final), {min(args.jobs, len(todo))} at a time"
+        f"{f' on {n_gpu} GPUs' if n_gpu else ''}; worker logs in {job_dir}")
+    t0, last = time.time(), ""
+    while todo or running:
+        while todo and len(running) < args.jobs:
+            k = todo.pop(0)
+            env = dict(os.environ, PYTHONUNBUFFERED="1")
+            if n_gpu:
+                env["CUDA_VISIBLE_DEVICES"] = str(k % n_gpu)
+            lf = open(os.path.join(job_dir, f"{names[k]}.log"), "w")
+            running[k] = (subprocess.Popen(cmd + ["--job", str(k)], stdout=lf, stderr=subprocess.STDOUT, env=env), lf)
+            state[k] = "loading"
+        time.sleep(2)
+        for k, (proc, lf) in list(running.items()):
+            with open(os.path.join(job_dir, f"{names[k]}.log"), errors="replace") as f:
+                ep = [ln.split()[1] for ln in f if ln.strip().startswith("epoch ")]
+            if ep:
+                state[k] = ep[-1]
+            if proc.poll() is not None:
+                lf.close()
+                del running[k]
+                state[k] = "done" if proc.returncode == 0 else "FAILED"
+        line = "  ".join(f"{names[k]} {state[k]}" for k in sorted(state))
+        if line != last:
+            print(f"  {(time.time() - t0) / 60:5.1f} min  {line}", flush=True)
+            last = line
+    bad = [k for k in state if state[k] == "FAILED"]
+    if bad:
+        for k in bad:
+            with open(os.path.join(job_dir, f"{names[k]}.log"), errors="replace") as f:
+                print(f"--- {names[k]} log (end) ---\n" + "".join(f.readlines()[-15:]))
+        sys.exit(f"{len(bad)} training job(s) failed; see {job_dir}")
+    log(f"All {args.folds + 1} models trained in {(time.time() - t0) / 60:.1f} min")
+
+    where = {it["row"]["ir_path"]: i for i, it in enumerate(items)}
+    oof_probs, per_fold = [None] * len(items), []
+    for k in range(args.folds):
+        d = np.load(os.path.join(job_dir, f"fold{k}.npz"))
+        pairs = [(where[key], pr) for key, pr in zip(d["keys"], d["probs"]) if key in where]
+        for i, pr in pairs:
+            oof_probs[i] = pr
+        s = score([items[i] for i, _ in pairs], masks_from_probs([pr for _, pr in pairs], 0.5))
+        per_fold.append(s)
+        log(f"Fold {k + 1}/{args.folds}: test sows {report['folds'][str(k)]} ({len(pairs)} frames)  "
+            f"presence F1 {s['presence_f1']}  IoU {s['iou_mean']}  Dice {s['dice_mean']}")
+    missing = [items[i]["row"]["ir_path"] for i, pr in enumerate(oof_probs) if pr is None]
+    if missing:
+        sys.exit(f"{len(missing)} frames have no held-out prediction (a worker could not read them), "
+                 f"e.g. {missing[0]}; rerun, ideally from a local copy of the label set")
+    return oof_probs, per_fold, torch.load(os.path.join(job_dir, "final.pt"), map_location="cpu")
+
+
+def finish_cv(args, items, folds, oof_probs, per_fold, report, log):
+    """Out-of-fold probabilities -> outline threshold, confidence cut, report and per-frame CSV."""
+    threshold, overall, by_thr = pick_threshold(items, oof_probs)
+    oof = masks_from_probs(oof_probs, threshold)
+    report["cv"] = {"overall": overall, "per_fold_at_0.5": per_fold, "threshold": threshold,
+                    "by_threshold": {str(t): {k: s[k] for k in ("presence_f1", "iou_mean", "area_error_mean")}
+                                     for t, s in by_thr}}
+    c = overall["confusion"]
+    log("")
+    log(f"Cross-validation (sows held out), {overall['frames']} frames, mask threshold {threshold}:")
+    log(f"  Vulva visible: precision {overall['presence_precision']}, recall {overall['presence_recall']}, "
+        f"F1 {overall['presence_f1']}, accuracy {overall['presence_accuracy']}")
+    log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
+    log(f"  Mask on frames both call visible: IoU {overall['iou_mean']}, Dice {overall['dice_mean']}, "
+        f"area error {overall['area_error_mean']}")
+    peaks = [float(p.max()) for p in oof_probs]
+    confs = [blob_confidence(p, m) for p, m in zip(oof_probs, oof)]
+    presence = pick_presence_cut(items, oof, confs, args.presence_precision)
+    if presence is None:
+        log(f"  No confidence cut reaches precision {args.presence_precision}; using none")
+        presence = 0.0
+    kept = [m if c >= presence else np.zeros_like(m) for m, c in zip(oof, confs)]
+    cut = score(items, kept)
+    report["cv"]["presence_cut"] = {"score": "mean prob in blob", "threshold": presence,
+                                    "target_precision": args.presence_precision, "overall": cut}
+    c = cut["confusion"]
+    spec = c["tn"] / max(c["tn"] + c["fp"], 1)
+    log(f"With confidence cut {presence} (target precision {args.presence_precision}; used by run_vulva):")
+    log(f"  Vulva visible: precision {cut['presence_precision']}, recall {cut['presence_recall']}, "
+        f"specificity {spec:.3f}, F1 {cut['presence_f1']}")
+    log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
+    log(f"  Mask on frames both call visible: IoU {cut['iou_mean']}, Dice {cut['dice_mean']}, "
+        f"area error {cut['area_error_mean']}")
+    with open(os.path.join(args.out_dir, "cv_predictions.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        # per frame, so results can be split later (e.g. hand-drawn vs accepted model suggestions)
+        # pred_area_px / iou are before the confidence cut; peak_prob and blob_conf let it be re-tuned
+        w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "fold",
+                    "pred_area_px", "true_area_px", "iou", "peak_prob", "blob_conf"])
+        for it, p, pk, cf in zip(items, oof, peaks, confs):
+            r = it["row"]
+            t, q = it["mask"].astype(bool), p.astype(bool)
+            iou = round(float((t & q).sum() / (t | q).sum()), 4) if (t.any() and q.any()) else ""
+            w.writerow([r["timestamp_folder"], r["pig_id"], r["pig_timestamp"], r["label"], r.get("how", ""),
+                        folds[it["pig_id"]], int(p.sum()), int(it["mask"].sum()), iou,
+                        round(pk, 4), round(cf, 4)])
+    return threshold, presence
 
 def copy_results(model_path, out_dir, dest):
     """Plain read/write copy (Windows CopyFile, used by PowerShell copy, is refused on \\\\tsclient shares).
