@@ -343,6 +343,65 @@ def test_presence_cut_reaches_target_precision():
     assert pick_presence_cut(items, pred, [.1] * 6 + [0] + [.95] * 4, 0.9) is None
 
 
+def test_saved_ellipse_round_trip_for_review():
+    """Review mode redraws a saved ellipse from its stored parameters; Enter must save the same one."""
+    from label_ellipse import ellipse_from_clicks, saved_clicks
+    for ang in (90.0, 75.0, 110.0, -80.0):
+        row = {"cx": "330", "cy": "250", "half_length_px": "38", "half_width_px": "21", "angle_deg": str(ang)}
+        e = ellipse_from_clicks(*saved_clicks(row))
+        assert abs(e[0] - 330) < 1e-6 and abs(e[1] - 250) < 1e-6 and abs(e[2] - 38) < 1e-6 and abs(e[3] - 21) < 1e-6
+        assert abs(((e[4] - ang) + 90) % 180 - 90) < 1e-6          # same axis (direction may flip)
+    assert saved_clicks({"cx": "", "cy": ""}) is None
+
+
+def test_review_mode_keeps_or_changes_saved_labels():
+    """--review: Enter keeps the saved ellipse (how unchanged), t turns it into 'tail' (not visible)."""
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(3)
+        folder = os.path.join(tmp, "20260209-09-00-00")
+        os.makedirs(folder)
+        fields = ["timestamp_folder", "pig_id", "pig_timestamp", "ir_path", "depth_path", "posture_confidence"]
+        frames, labels = [], []
+        for pid in range(3):
+            ts = f"20260209-09-00-{10 + pid:02d}"
+            _write_frame(folder, pid, ts, True, rng)
+            ir = f"20260209-09-00-00/pig{pid}_ir_vis_{ts}.jpg"
+            frames.append({"timestamp_folder": "20260209-09-00-00", "pig_id": pid, "pig_timestamp": ts, "ir_path": ir,
+                           "depth_path": "", "posture_confidence": 0.9})
+            labels.append({"ir_path": ir, "mask_path": "", "label": "present", "pig_id": pid,
+                           "timestamp_folder": "20260209-09-00-00", "pig_timestamp": ts, "cx": 320, "cy": 250,
+                           "half_length_px": 30, "half_width_px": 18, "angle_deg": 90, "how": "accepted"})
+        for name, rows in (("label_set.csv", frames), ("labels.csv", labels)):
+            with open(os.path.join(tmp, name), "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                w.writeheader()
+                w.writerows(rows)
+        driver = os.path.join(tmp, "drive.py")
+        with open(driver, "w") as f:
+            f.write(
+                "import sys, matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
+                "from matplotlib.backend_bases import KeyEvent\n"
+                "def show():\n    fig = plt.gcf()\n"
+                "    for k in ('enter', 't', 'q'):\n"
+                "        fig.canvas.callbacks.process('key_press_event', KeyEvent('key_press_event', fig.canvas, k))\n"
+                "plt.show = show\n"
+                f"sys.path.insert(0, {os.path.join(ROOT, 'vulva')!r})\n"
+                f"sys.argv = ['label_ellipse.py', {tmp!r}, '--review', 'r6', '--no-depth', '--no-rgb']\n"
+                "import label_ellipse\nlabel_ellipse.main()\n")
+        out = subprocess.run([PY, driver], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert "Review r6: 3 to go" in out.stdout and "1 kept, 1 tail" in out.stdout, out.stdout
+        with open(os.path.join(tmp, "labels.csv")) as f:
+            rows = {r["pig_id"]: r for r in csv.DictReader(f)}
+        assert rows["0"]["review"] == "r6 kept" and rows["0"]["how"] == "accepted" and rows["0"]["label"] == "present"
+        assert os.path.exists(os.path.join(tmp, rows["0"]["mask_path"]))
+        assert rows["1"]["label"] == "absent" and rows["1"]["note"] == "tail" and rows["1"]["review"] == "r6 tail"
+        assert rows["2"]["review"] == "" and rows["2"]["label"] == "present"
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_depth_input_stack():
     """ir+depth input: channel 0 is the IR, channel 1 height (128 = level skin, higher on the bump),
     channel 2 shading; missing depth gives a flat, cue-free stack."""

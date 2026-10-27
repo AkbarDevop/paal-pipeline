@@ -18,9 +18,14 @@ parallax), and it zooms with the others. --no-rgb hides it.
     click 1  top end of the vulva       (the view then zooms in below it; --zoom 0 turns that off)
     click 2  bottom end
     click 3  one side, at the widest point
-    Enter    save the ellipse            n  not visible (tail, lying, blur)
+    Enter    save the ellipse            n  not visible (turned, lying, blur, feces)
+    t        tail covers part of it      (saved as not visible, note "tail")
     u        undo the last click         s  skip for now
     q        save and quit (run again to continue where you stopped)
+
+Outline rule (from 2026-10-27): the whole vulva to its outer edge, lips and dark centre
+together, not just the dark centre. If the tail covers any part of it, press t: a partly
+hidden vulva gives a wrong size, so it counts as not visible.
 
 The vulva is close to an ellipse, so three clicks give a usable training mask
 in a few seconds, and the clicked length and width are kept as image-space
@@ -35,9 +40,16 @@ your own top click, u removes the suggested side point so you can re-click it.
 the ones that teach the next model the most. The "how" column records whether
 a label was clicked by hand or accepted from the model.
 
+Review mode (--review TAG): goes through frames that are already labelled and shows the
+saved ellipse (white, dashed). Enter keeps it, a click redraws it, n / t change it to not
+visible. Each reviewed row gets review = "TAG kept" / "TAG redrawn" / "TAG not visible" /
+"TAG tail", so a review can stop and resume. Only frames labelled visible are reviewed
+unless --review-absent is given.
+
 Usage:
     python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set
     python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r1.pth --hard-first
+    python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --review r6
 """
 
 from __future__ import annotations
@@ -51,7 +63,7 @@ import cv2
 import numpy as np
 
 FIELDS = ["ir_path", "mask_path", "label", "pig_id", "timestamp_folder", "pig_timestamp",
-          "cx", "cy", "half_length_px", "half_width_px", "angle_deg", "how"]
+          "cx", "cy", "half_length_px", "half_width_px", "angle_deg", "how", "note", "review"]
 FULL_W, FULL_H = 640, 480
 CROP = (120, 30, 500, 480)
 
@@ -67,6 +79,22 @@ def ellipse_from_clicks(top, bottom, side):
         return None
     half_w = abs(dy * (x3 - x1) - dx * (y3 - y1)) / (2 * half_len)
     return cx, cy, half_len, max(half_w, 1.0), math.degrees(math.atan2(dy, dx))
+
+
+def clicks_from_params(cx, cy, half_len, half_w, angle_deg):
+    """Saved ellipse -> the (top, bottom, side) clicks that redraw it with ellipse_from_clicks."""
+    t = math.radians(angle_deg)
+    ux, uy = math.cos(t), math.sin(t)
+    p1, p2 = (cx - ux * half_len, cy - uy * half_len), (cx + ux * half_len, cy + uy * half_len)
+    top, bottom = (p1, p2) if p1[1] <= p2[1] else (p2, p1)
+    return [top, bottom, (cx - uy * half_w, cy + ux * half_w)]
+
+
+def saved_clicks(row):
+    try:
+        return clicks_from_params(*(float(row[k]) for k in ("cx", "cy", "half_length_px", "half_width_px", "angle_deg")))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def clicks_from_mask(mask, min_area=30):
@@ -161,6 +189,9 @@ def main():
                     help="approximate ToF-pixel -> RGB-pixel map for 1280x800 RGB: scale,dx,dy (used to show "
                          "the same area of the unaligned RGB image)")
     ap.add_argument("--height-span", type=float, default=8.0, help="height colour scale, +/- mm")
+    ap.add_argument("--review", default="", metavar="TAG",
+                    help="review frames already labelled (saved ellipse shown; Enter keeps, click redraws)")
+    ap.add_argument("--review-absent", action="store_true", help="with --review: also frames labelled not visible")
     args = ap.parse_args()
 
     import matplotlib.pyplot as plt
@@ -174,13 +205,21 @@ def main():
     out_csv = os.path.join(set_dir, "labels.csv")
     done = load_done(out_csv)
     os.makedirs(os.path.join(set_dir, "masks"), exist_ok=True)
-    todo = [fr for fr in frames if fr["ir_path"] not in done]
-    print(f"{len(frames)} frames, {len(done)} already labelled, {len(todo)} to go")
+    review = args.review.strip()
+    if review:
+        want = ("present", "absent") if args.review_absent else ("present",)
+        todo = [fr for fr in frames if fr["ir_path"] in done and done[fr["ir_path"]]["label"] in want
+                and not (done[fr["ir_path"]].get("review") or "").startswith(review + " ")]
+        n_rev = sum((r.get("review") or "").startswith(review + " ") for r in done.values())
+        print(f"Review {review}: {len(todo)} to go, {n_rev} already reviewed")
+    else:
+        todo = [fr for fr in frames if fr["ir_path"] not in done]
+        print(f"{len(frames)} frames, {len(done)} already labelled, {len(todo)} to go")
     if not todo:
         return
 
     suggest = None
-    if args.model:
+    if args.model and not review:
         suggest = Suggester(os.path.expanduser(args.model))
         print(f"Model suggestions from {args.model} on {suggest.device}; predicting {len(todo)} frames ...")
         preds = suggest([os.path.join(set_dir, fr["ir_path"]) for fr in todo])
@@ -256,6 +295,15 @@ def main():
 
     def load_suggestion():
         state["clicks"], state["suggested"], state["hint"] = [], False, ""
+        if review:
+            row = done[current()["ir_path"]]
+            clicks = saved_clicks(row) if row["label"] == "present" else None
+            if clicks:
+                state["clicks"], state["suggested"] = clicks, True
+                state["hint"] = "saved outline: Enter keep, click to redraw, t tail covers part, n not visible"
+            else:
+                state["hint"] = "saved: not visible   n keep, t tail covers part, or click to draw it"
+            return
         if suggest is None:
             return
         clicks, pmax = suggest([os.path.join(set_dir, current()["ir_path"])])[0]
@@ -318,11 +366,11 @@ def main():
                 ref_ax.set_title("RGB (none for this frame)", fontsize=9)
             ref_ax.set_xticks([])
             ref_ax.set_yticks([])
-        n_done = len(done)
         hint = state.get("hint", "")
-        title = (f"pig {fr['pig_id']}   {fr['pig_timestamp']}   [{n_done + 1}/{len(frames)}]\n"
+        where = f"review {state['i'] + 1}/{len(todo)}" if review else f"{len(done) + 1}/{len(frames)}"
+        title = (f"pig {fr['pig_id']}   {fr['pig_timestamp']}   [{where}]\n"
                  + (hint + "\n" if hint else "")
-                 + "click top, bottom, side   Enter save   n not visible   u undo   s skip   q quit")
+                 + "click top, bottom, side   Enter save   n not visible   t tail covers part   u undo   s skip   q quit")
         if multi:
             fig.suptitle(title, fontsize=10)
         else:
@@ -336,10 +384,15 @@ def main():
             reset_view()
         fig.canvas.draw_idle()
 
-    def record(label, params=None):
+    def record(label, params=None, note=""):
         fr = current()
         how = "hand"
-        if suggest is not None:
+        old = done.get(fr["ir_path"], {})
+        if review:
+            kept = (label == "present" and state["suggested"]) or (label == "absent" and old.get("label") == "absent"
+                                                                    and note == (old.get("note") or ""))
+            how = old.get("how", "") if kept else "hand"
+        elif suggest is not None:
             model_said = "present" if (state["suggested"] or state.get("hint", "").startswith("model: vulva")) \
                 else "absent"
             if label == "present":
@@ -347,7 +400,11 @@ def main():
             else:
                 how = "accepted" if model_said == "absent" else "corrected"
         row = {"ir_path": fr["ir_path"], "mask_path": "", "label": label, "pig_id": fr["pig_id"],
-               "timestamp_folder": fr["timestamp_folder"], "pig_timestamp": fr["pig_timestamp"], "how": how}
+               "timestamp_folder": fr["timestamp_folder"], "pig_timestamp": fr["pig_timestamp"], "how": how,
+               "note": note, "review": old.get("review", "")}
+        if review:
+            what = ("kept" if state["suggested"] else "redrawn") if label == "present" else (note or "not visible")
+            row["review"] = f"{review} {what}"
         if params:
             name = f"{fr['timestamp_folder']}_pig{fr['pig_id']}_{fr['pig_timestamp']}.png"
             rel = os.path.join("masks", name).replace("\\", "/")
@@ -388,6 +445,9 @@ def main():
         elif k == "n":
             record("absent")
             advance()
+        elif k == "t":
+            record("absent", note="tail")
+            advance()
         elif k == "u" and state["clicks"]:
             state["clicks"].pop()
             state["suggested"] = False
@@ -404,6 +464,11 @@ def main():
     plt.show()
     pres = sum(r["label"] == "present" for r in done.values())
     print(f"Saved {len(done)} labels ({pres} present, {len(done) - pres} not visible) -> {out_csv}")
+    if review:
+        tags = [(r.get("review") or "")[len(review) + 1:] for r in done.values()
+                if (r.get("review") or "").startswith(review + " ")]
+        print(f"  review {review}: " + ", ".join(f"{tags.count(t)} {t}" for t in
+                                                  ("kept", "redrawn", "tail", "not visible") if tags.count(t)))
     if suggest is not None:
         hows = [r.get("how", "") for r in done.values() if r.get("how") in ("accepted", "corrected")]
         if hows:

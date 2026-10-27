@@ -21,7 +21,7 @@ python vulva/train_seg.py                                            # U-Net, CV
 python vulva/run_vulva.py <predictions.csv> --truth outputs/vulva/sow_day_truth.csv
 python vulva/repeatability.py <per-frame csv> --truth outputs/vulva/sow_day_truth.csv
 python vulva/eval_seg.py --model models/vulva_seg_r5.pth --labels <test set>/labels.csv  # blind end-to-end test
-python tests/test_vulva_pipeline.py                                  # 15 synthetic checks
+python tests/test_vulva_pipeline.py                                  # 17 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)
