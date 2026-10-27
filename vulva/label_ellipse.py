@@ -408,8 +408,15 @@ def main():
         if review:
             what = ("kept" if state["suggested"] else "redrawn") if label == "present" else (note or "not visible")
             row["review"] = f"{review} {what}"
+        if params and review and state["suggested"] and old.get("mask_path"):
+            # kept as it was: same mask file and numbers, nothing rewritten
+            row.update({k: old.get(k, "") for k in ("mask_path", "cx", "cy", "half_length_px", "half_width_px",
+                                                     "angle_deg")})
+            params = None
         if params:
-            name = f"{fr['timestamp_folder']}_pig{fr['pig_id']}_{fr['pig_timestamp']}.png"
+            # a review writes its own mask file, so earlier label snapshots keep pointing at their masks
+            tag = f"_{review}" if review else ""
+            name = f"{fr['timestamp_folder']}_pig{fr['pig_id']}_{fr['pig_timestamp']}{tag}.png"
             rel = os.path.join("masks", name).replace("\\", "/")
             cv2.imwrite(os.path.join(set_dir, rel), ellipse_mask(params))
             row.update({"mask_path": rel, "cx": round(params[0], 1), "cy": round(params[1], 1),

@@ -369,9 +369,10 @@ def test_review_mode_keeps_or_changes_saved_labels():
             ir = f"20260209-09-00-00/pig{pid}_ir_vis_{ts}.jpg"
             frames.append({"timestamp_folder": "20260209-09-00-00", "pig_id": pid, "pig_timestamp": ts, "ir_path": ir,
                            "depth_path": "", "posture_confidence": 0.9})
-            labels.append({"ir_path": ir, "mask_path": "", "label": "present", "pig_id": pid,
+            labels.append({"ir_path": ir, "label": "present", "pig_id": pid,
                            "timestamp_folder": "20260209-09-00-00", "pig_timestamp": ts, "cx": 320, "cy": 250,
-                           "half_length_px": 30, "half_width_px": 18, "angle_deg": 90, "how": "accepted"})
+                           "half_length_px": 30, "half_width_px": 18, "angle_deg": 90, "how": "accepted",
+                           "mask_path": f"masks/old{pid}.png"})
         for name, rows in (("label_set.csv", frames), ("labels.csv", labels)):
             with open(os.path.join(tmp, name), "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -395,7 +396,7 @@ def test_review_mode_keeps_or_changes_saved_labels():
         with open(os.path.join(tmp, "labels.csv")) as f:
             rows = {r["pig_id"]: r for r in csv.DictReader(f)}
         assert rows["0"]["review"] == "r6 kept" and rows["0"]["how"] == "accepted" and rows["0"]["label"] == "present"
-        assert os.path.exists(os.path.join(tmp, rows["0"]["mask_path"]))
+        assert rows["0"]["mask_path"] == "masks/old0.png"                  # kept: the saved mask is not rewritten
         assert rows["1"]["label"] == "absent" and rows["1"]["note"] == "tail" and rows["1"]["review"] == "r6 tail"
         assert rows["2"]["review"] == "" and rows["2"]["label"] == "present"
     finally:
