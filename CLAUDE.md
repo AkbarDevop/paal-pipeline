@@ -21,7 +21,8 @@ python vulva/train_seg.py                                            # U-Net, CV
 python vulva/run_vulva.py <predictions.csv> --truth outputs/vulva/sow_day_truth.csv
 python vulva/repeatability.py <per-frame csv> --truth outputs/vulva/sow_day_truth.csv
 python vulva/eval_seg.py --model models/vulva_seg_r5.pth --labels <test set>/labels.csv  # blind end-to-end test
-python tests/test_vulva_pipeline.py                                  # 17 synthetic checks
+python vulva/register_rgb.py <label set>                            # colour image on the IR grid (labelling + sheets)
+python tests/test_vulva_pipeline.py                                  # 18 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)
@@ -71,7 +72,7 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 
 ### Task B (Vulva — IN PROGRESS, lives in `vulva/`)
 - v2: `truth.py`, `make_seg_labels.py`, `seg_model.py`, `train_seg.py`, `select_frames.py`, `measure3d.py`, `daily.py`, `run_vulva.py`, `repeatability.py` (see HANDOFF.md Task B)
-- Labelling: `export_label_set.py` (lab PC → label set), `label_ellipse.py` (3 clicks per vulva; IR + depth shading + height panels, RGB when exported with `--rgb`/`--add-rgb`; `--model` suggestions), `depth_views.py` (shading / height pictures from the ToF depth)
+- Labelling: `export_label_set.py` (lab PC → label set), `label_ellipse.py` (3 clicks per vulva; IR + colour + depth shading + height panels; `--model` suggestions, `--review TAG`, `t` = tail covers part), `register_rgb.py` / `rgb_align.py` (colour image matched onto the IR grid), `depth_views.py` (shading / height pictures from the ToF depth), `eval_seg.py` (blind end-to-end test)
 - `vulva/point_cloud.py` — Core 3D engine: depth backprojection, pig segmentation, vulva IR detection
 - `vulva/build_depthmaps.py` — Batch: all depth_*.raw → depthmap/ (232 pigs processed)
 - `vulva/crop_vulva_pointcloud.py` — Interactive vulva rectangle selection + cropped 3D export

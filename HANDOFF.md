@@ -216,7 +216,7 @@ python vulva/repeatability.py outputs/vulva/vulva_frames.csv --truth outputs/vul
 | `vulva/run_vulva.py` | Steps 1–4 in one command; writes `vulva_frames.csv`, `vulva_daily.csv`, `vulva_vs_caliper.csv`, `vulva_review.jpg`, `vulva_summary.json`. |
 | `vulva/repeatability.py` | Within-day SD, error vs calipers, frames needed per sow-day. |
 
-Checks: `python tests/test_vulva_pipeline.py` (17 synthetic tests, including a tiny train → run).
+Checks: `python tests/test_vulva_pipeline.py` (18 synthetic tests, including a tiny train → run).
 
 ### Labelling (the masks from the hand-crop work are not on the lab PC)
 
@@ -241,8 +241,10 @@ python vulva/train_seg.py --labels ~/Downloads/paal_exchange/vulva_label_set/lab
 # plain RGB from the separate colour camera is shown whole for reference
 python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --add-rgb
 
+# colour image on the IR grid (once per set, after --rgb / --add-rgb): becomes the 2nd, clickable panel
+python vulva/register_rgb.py ~/Downloads/paal_exchange/vulva_label_set
 # re-check saved labels against the outline rule (whole vulva to its outer edge; t = tail covers part)
-python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --review r6
+python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --review r7
 # after a first model: it suggests each ellipse (Enter accept, n agree, click to redo), hardest frames first
 python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --model models/vulva_seg_r5.pth --hard-first
 ```
@@ -251,7 +253,7 @@ Status (2026-10-26): all 360 Feb 6–11 frames labelled (234 visible), snapshot 
 
 ### Next
 
-1. Blind test done 2026-10-27 (148 Feb 12–15 frames in `vulva_test_feb12`, hand-labelled without suggestions; keep it as the test set and do not train on it): r5 finds 99% of vulvas, but its outlines are about 15% small and it draws tail-covered vulvas. Next: review the 234 visible training labels with the outline rule (whole vulva to its outer edge; tail covering any part = `t`): `python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_label_set --review r6`. Then snapshot `labels_r6.csv`, train r6 on the lab PC (`--jobs 6`), and run `eval_seg.py` for r6 and r5 on the blind set.
+1. Blind test done 2026-10-27 (148 Feb 12–15 frames in `vulva_test_feb12`, hand-labelled without suggestions; keep it as the test set and do not train on it): r5 finds 99% of vulvas, but its outlines are about 15% small and it draws tail-covered vulvas. Review r6 (IR panels) moved 32 tail-covered vulvas to not visible (`labels_r6.csv`; r6 trains on it) but kept the small outlines. Next: `register_rgb.py` on the label set, review the 200 visible outlines again on the colour panel (`--review r7`), snapshot `labels_r7.csv`, train r7, and compare r5 / r6 / r7 with `eval_seg.py` on the blind set.
 2. Done 2026-10-26: posture on Feb 12–17 (`outputs\gt_feb12`) and `run_vulva.py --model models\vulva_seg_r5.pth` on Feb 6–17 (`outputs\vulva_r5_feb06_17` on the lab PC, copied to the Mac). First look in CHANGELOG.md: volume peaks on Feb 10, W × L does not rise. Still to do: download `Feb_2026.xlsx`, run `truth.py`, and compare each sow's daily values with her calipers and heat days, including whether her heat days lose more frames to the cut.
 3. Add the vulva change to the heat model next to night transitions and days since move (`estrus/`).
 4. More labels from other days and other pig groups (new sows matter most), drawn or corrected by hand rather than accepted; the least confident frames of the Feb 6–17 run are the ones to label. Also redraw the two sliver labels noted in CHANGELOG.md.

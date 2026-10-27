@@ -8,8 +8,11 @@ lump; flat feces and dark marks vanish) and "height" (mm above the sow's own
 body surface, red = sticks out). Click on any of the three; the views zoom
 together. --no-depth shows the IR image alone.
 
-If the set has colour images (export_label_set.py --rgb / --add-rgb), the
-aligned RGB is a fourth clickable panel. Plain RGB from the separate colour
+If the set has colour images (export_label_set.py --rgb / --add-rgb), run
+register_rgb.py on it once: the colour image is then matched onto the IR pixel
+grid and shown as the second panel, clickable and zooming with the others. It
+shows the vulva's outer edge far better than the IR. Otherwise the aligned RGB
+(if the camera saved one) is that panel. Plain RGB from the separate colour
 camera is not pixel-aligned: it is shown for reference, cropped to roughly the
 same area with an approximate map (--rgb-map, fitted by hand on the stall bars
 and anus of three Feb 6-7 frames; off by up to ~30 IR pixels because of
@@ -326,10 +329,10 @@ def main():
                 panels += [("3D shading (no depth)", blank), ("height (no depth)", blank)]
             else:
                 panels += [("3D shading", v[0]), (f"height, mm (+/-{args.height_span:g}, red = sticks out)", v[1])]
-        if rgb_mode == "aligned":
+        if rgb_mode == "aligned":                 # colour next to the IR: it shows the vulva edge best
             rgb = read_rgb(fr.get("rgb_aligned_path", ""), True)
-            panels.append(("RGB (aligned)" if rgb is not None else "RGB (none for this frame)",
-                           rgb if rgb is not None else np.full((FULL_H, FULL_W, 3), 30, np.uint8)))
+            panels.insert(1, ("colour (matched to IR)" if rgb is not None else "colour (none for this frame)",
+                              rgb if rgb is not None else np.full((FULL_H, FULL_W, 3), 30, np.uint8)))
         e = ellipse_from_clicks(*state["clicks"]) if len(state["clicks"]) == 3 else None
         hand = not state["suggested"]
         for a, (name, im) in zip(axes, panels):

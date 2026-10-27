@@ -14,7 +14,8 @@ Writes, under --out-dir:
   eval_frames.csv   one row per frame (verdict, confidence, IoU, both sizes)
   eval_report.txt   the numbers above
   eval_sheet.jpg    every frame, mistakes first; hand outline green, model outline yellow
-                    (orange when the confidence cut dropped it)
+                    (orange when the confidence cut dropped it), drawn on the colour image when
+                    the set has one (register_rgb.py, or matched on the fly), else on the IR
 
 Label the test frames by hand without model suggestions, or the test is not independent:
     python vulva/label_ellipse.py ~/Downloads/paal_exchange/vulva_test_feb12
@@ -38,6 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 from measure3d import load_depth_raw, load_intrinsics, measure  # noqa: E402
+from rgb_align import register  # noqa: E402
 from seg_model import default_depth_path, ir_channel, load_checkpoint, predict, read_input, read_mask  # noqa: E402
 
 FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "verdict", "model_visible",
@@ -51,7 +53,14 @@ def read_rows(labels_csv):
     res = lambda p: p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(base, p)  # noqa: E731
     with open(labels_csv, newline="", encoding="utf-8-sig") as f:
         rows = [r for r in csv.DictReader(f) if r.get("label") in ("present", "absent")]
+    colour = {}                                   # colour images listed in the set's label_set.csv
+    ls = os.path.join(base, "label_set.csv")
+    if os.path.exists(ls):
+        with open(ls, newline="", encoding="utf-8-sig") as f:
+            colour = {fr["ir_path"]: (fr.get("rgb_aligned_path", ""), fr.get("rgb_path", "")) for fr in csv.DictReader(f)}
     for r in rows:
+        reg, plain = colour.get(r["ir_path"], ("", ""))
+        r["rgb_reg"], r["rgb_plain"] = res(reg), res(plain)
         r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
         r["depth_path"] = res(r.get("depth_path", "")) or default_depth_path(r["ir_path"])
     return rows
@@ -88,8 +97,29 @@ def evaluate(model, ckpt, rows, device, K=None):
                     "human_width_mm": hm.get("width_mm", ""), "model_width_mm": mm.get("width_mm", ""),
                     "human_length_mm": hm.get("length_mm", ""), "model_length_mm": mm.get("length_mm", ""),
                     "human_status": hm.get("measure_status", ""), "model_status": mm.get("measure_status", ""),
-                    "ir_path": r["ir_path"], "_ir": ir_channel(img), "_human": human, "_model": mask})
+                    "ir_path": r["ir_path"], "_ir": ir_channel(img), "_human": human, "_model": mask,
+                    "_rgb": (r.get("rgb_reg", ""), r.get("rgb_plain", ""))})
     return out
+
+
+def colour_view(f):
+    """The frame's colour image on the IR grid, or None."""
+    reg, plain = f.get("_rgb", ("", ""))
+    if reg and os.path.exists(reg):
+        im = cv2.imread(reg, cv2.IMREAD_COLOR)
+        if im is not None and im.shape[:2] == f["_ir"].shape[:2]:
+            return im
+    if plain and os.path.exists(plain):
+        rgb = cv2.imread(plain, cv2.IMREAD_COLOR)
+        if rgb is not None:
+            centre = None
+            for m in (f["_human"], f["_model"]):
+                if m is not None and m.any():
+                    ys, xs = m.nonzero()
+                    centre = (xs.mean(), ys.mean())
+                    break
+            return register(f["_ir"], rgb, centre)[0]
+    return None
 
 
 def summarise(frames, cut):
@@ -126,7 +156,7 @@ def summarise(frames, cut):
     return lines
 
 
-def tile(f, size=200, half=110):
+def tile(f, size=200, half=110, colour=True):
     ir, hm, md = f["_ir"], f["_human"], f["_model"]
     union = np.zeros(ir.shape, bool)
     for m in (hm, md):
@@ -139,12 +169,13 @@ def tile(f, size=200, half=110):
         cy, cx = ir.shape[0] // 2 + 20, ir.shape[1] // 2
     y1, x1 = max(cy - half, 0), max(cx - half, 0)
     y2, x2 = min(y1 + 2 * half, ir.shape[0]), min(x1 + 2 * half, ir.shape[1])
-    crop = cv2.equalizeHist(ir[y1:y2, x1:x2])
-    t = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+    rgb = colour_view(f) if colour else None
+    t = rgb[y1:y2, x1:x2].copy() if rgb is not None else cv2.cvtColor(cv2.equalizeHist(ir[y1:y2, x1:x2]),
+                                                                       cv2.COLOR_GRAY2BGR)
     for m, col in ((hm, (60, 200, 60)), (md, (0, 220, 255) if f["model_visible"] else (0, 140, 255))):
         if m is not None and m.any():
             cnts, _ = cv2.findContours(m[y1:y2, x1:x2].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            cv2.drawContours(t, cnts, -1, col, 1)
+            cv2.drawContours(t, cnts, -1, col, 2 if rgb is not None else 1)
     t = cv2.resize(t, (size, size), interpolation=cv2.INTER_LINEAR)
     ts = str(f["pig_timestamp"])
     top = f"p{f['pig_id']} {ts[4:6]}/{ts[6:8]} {ts[9:11]}:{ts[12:14]}"
@@ -155,9 +186,9 @@ def tile(f, size=200, half=110):
     return t
 
 
-def save_sheet(frames, path, cols=8):
+def save_sheet(frames, path, cols=8, colour=True):
     key = lambda f: (ORDER[f["verdict"]], float(f["iou"]) if f["iou"] != "" else 1.0)  # noqa: E731
-    tiles = [tile(f) for f in sorted(frames, key=key)]
+    tiles = [tile(f, colour=colour) for f in sorted(frames, key=key)]
     if not tiles:
         return
     blank = np.zeros_like(tiles[0])
@@ -171,6 +202,7 @@ def main():
     ap.add_argument("--labels", required=True, help="labels.csv of a label set the model was not trained on")
     ap.add_argument("--out-dir", default="", help="default: outputs/eval_<model name>")
     ap.add_argument("--calibration", default="", help="calibration.json with tof_intrinsics")
+    ap.add_argument("--ir-sheet", action="store_true", help="draw the sheet on the IR image even if colour exists")
     args = ap.parse_args()
 
     name = os.path.splitext(os.path.basename(args.model))[0]
@@ -190,7 +222,7 @@ def main():
         w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(frames)
-    save_sheet(frames, os.path.join(out_dir, "eval_sheet.jpg"))
+    save_sheet(frames, os.path.join(out_dir, "eval_sheet.jpg"), colour=not args.ir_sheet)
     print(f"Outputs in {out_dir} (eval_sheet.jpg: mistakes first; hand outline green, model yellow, "
           f"orange = dropped by the confidence cut)")
 

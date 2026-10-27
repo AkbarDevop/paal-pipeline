@@ -21,6 +21,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import sys
 import time
 
@@ -33,6 +34,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 from daily import METRICS, add_baseline_change, aggregate, compare_truth  # noqa: E402
 from measure3d import MEASURE_FIELDS, load_depth_raw, load_intrinsics, measure  # noqa: E402
+from rgb_align import register  # noqa: E402
 from seg_model import ir_channel, load_checkpoint, predict, read_input  # noqa: E402
 from select_frames import parse_windows, select  # noqa: E402
 
@@ -48,15 +50,29 @@ def write_csv(rows, path, fields=None):
         w.writerows(rows)
 
 
-def overlay_tile(gray, mask, label, size=160):
+def colour_on_ir_grid(ir_path, gray, mask):
+    """The frame's colour image (pigN_rgb_<ts> next to the IR) matched onto the IR grid, or None."""
+    d, name = os.path.split(ir_path)
+    for ext in (".jpg", ".png"):
+        p = os.path.join(d, name.replace("_ir_vis_", "_rgb_").rsplit(".", 1)[0] + ext)
+        if os.path.exists(p):
+            rgb = cv2.imread(p, cv2.IMREAD_COLOR)
+            if rgb is not None:
+                ys, xs = np.nonzero(mask)
+                return register(gray, rgb, (xs.mean(), ys.mean()))[0]
+    return None
+
+
+def overlay_tile(gray, mask, label, size=160, colour=None):
     ys, xs = np.nonzero(mask)
     cy, cx = int(ys.mean()), int(xs.mean())
-    h = 50
+    h = 70 if colour is not None else 50
     y1, y2 = max(cy - h, 0), min(cy + h, gray.shape[0])
     x1, x2 = max(cx - h, 0), min(cx + h, gray.shape[1])
-    tile = cv2.cvtColor(gray[y1:y2, x1:x2], cv2.COLOR_GRAY2BGR)
+    tile = (colour[y1:y2, x1:x2].copy() if colour is not None
+            else cv2.cvtColor(gray[y1:y2, x1:x2], cv2.COLOR_GRAY2BGR))
     cnts, _ = cv2.findContours(mask[y1:y2, x1:x2].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    cv2.drawContours(tile, cnts, -1, (0, 220, 255), 1)
+    cv2.drawContours(tile, cnts, -1, (0, 220, 255), 2 if colour is not None else 1)
     tile = cv2.resize(tile, (size, size), interpolation=cv2.INTER_NEAREST)
     cv2.putText(tile, label, (4, size - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1, cv2.LINE_AA)
     return tile
@@ -82,7 +98,10 @@ def main():
     ap.add_argument("--calibration", default="", help="calibration.json with tof_intrinsics")
     ap.add_argument("--baseline-days", type=int, default=2)
     ap.add_argument("--min-frames", type=int, default=3, help="minimum good frames for a daily value")
-    ap.add_argument("--overlays", type=int, default=48, help="frames on the review contact sheet")
+    ap.add_argument("--overlays", type=int, default=48,
+                    help="frames on the review contact sheet (random across all days, on the colour image when "
+                         "there is one)")
+    ap.add_argument("--ir-sheet", action="store_true", help="review sheet on the IR image instead of colour")
     ap.add_argument("--save-masks", action="store_true", help="write each predicted mask as PNG")
     ap.add_argument("--batch-size", type=int, default=16)
     args = ap.parse_args()
@@ -105,6 +124,8 @@ def main():
     if args.save_masks:
         os.makedirs(mask_dir, exist_ok=True)
     rows, tiles = [], []
+    # review sheet: a random sample over all days (seeded, so a rerun shows the same frames)
+    pick = set(random.Random(0).sample(range(len(cands)), min(len(cands), 2 * args.overlays)))
     for i in range(0, len(cands), 64):
         chunk = cands[i:i + 64]
         grays = [read_input(c["ir_path"], c["depth_path"], inputs) for c in chunk]
@@ -127,9 +148,11 @@ def main():
                     p = os.path.join(mask_dir, f"{c['timestamp_folder']}_pig{c['pig_id']}_{c['pig_timestamp']}.png")
                     cv2.imwrite(p, mask * 255)
                     row["mask_path"] = p
-                if len(tiles) < args.overlays and m["measure_status"] == "ok":
-                    tiles.append(overlay_tile(ir_channel(grays[j]), mask, f"p{c['pig_id']} {c['pig_timestamp'][4:13]} "
-                                              f"W{m['width_mm']:.0f} L{m['length_mm']:.0f}"))
+                if i + j in pick and m["measure_status"] == "ok":
+                    gray = ir_channel(grays[j])
+                    colour = None if args.ir_sheet else colour_on_ir_grid(c["ir_path"], gray, mask)
+                    tiles.append(overlay_tile(gray, mask, f"p{c['pig_id']} {c['pig_timestamp'][4:13]} "
+                                              f"W{m['width_mm']:.0f} L{m['length_mm']:.0f}", colour=colour))
             else:
                 row["measure_status"] = "low_confidence" if 0 < conf < presence else "not_visible"
             rows.append(row)
@@ -137,6 +160,9 @@ def main():
 
     frames_csv = os.path.join(args.out_dir, "vulva_frames.csv")
     write_csv(rows, frames_csv, FRAME_FIELDS)
+    if len(tiles) > args.overlays:                    # keep the sheet in time order, spread over the run
+        keep = sorted(random.Random(1).sample(range(len(tiles)), args.overlays))
+        tiles = [tiles[k] for k in keep]
     save_sheet(tiles, os.path.join(args.out_dir, "vulva_review.jpg"))
 
     daily = add_baseline_change(aggregate(rows, min_frames=args.min_frames), args.baseline_days)

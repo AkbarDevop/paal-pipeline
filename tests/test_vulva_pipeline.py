@@ -402,6 +402,47 @@ def test_review_mode_keeps_or_changes_saved_labels():
         shutil.rmtree(tmp)
 
 
+def test_rgb_align_recovers_a_known_shift():
+    """rgb_align: a colour image made from the IR with a known offset is put back on the IR grid;
+    register_rgb.py writes it into a label set without touching frames or labels."""
+    from rgb_align import MAP, register
+    from register_rgb import register_set
+    rng = np.random.default_rng(11)
+    ir = cv2.GaussianBlur(rng.integers(0, 255, (480, 640)).astype(np.uint8), (0, 0), 6)
+    ir = cv2.normalize(ir, None, 0, 255, cv2.NORM_MINMAX)
+    for _ in range(25):
+        cv2.ellipse(ir, (int(rng.integers(120, 520)), int(rng.integers(80, 420))),
+                    (int(rng.integers(8, 30)), int(rng.integers(8, 30))), 0, 0, 360, int(rng.integers(0, 255)), -1)
+    s, dx, dy = MAP
+    true = (21, 4)
+    A = np.array([[1 / s, 0, -dx / s - true[0]], [0, 1 / s, -dy / s - true[1]]], np.float32)
+    rgb = cv2.cvtColor(cv2.warpAffine(ir, A, (1280, 800), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP),
+                       cv2.COLOR_GRAY2BGR)
+    img, shift, score, how = register(ir, rgb, (330, 250))
+    assert how == "vulva" and abs(shift[0] - true[0]) <= 1 and abs(shift[1] - true[1]) <= 1, (shift, score)
+    back = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)[100:400, 150:500].astype(float)
+    assert np.abs(back - ir[100:400, 150:500]).mean() < 6
+    tmp = tempfile.mkdtemp()
+    try:
+        os.makedirs(os.path.join(tmp, "f"))
+        cv2.imwrite(os.path.join(tmp, "f", "pig1_ir_vis_20260213-09-00-11.jpg"), ir)
+        cv2.imwrite(os.path.join(tmp, "f", "pig1_rgb_20260213-09-00-11.jpg"), rgb)
+        with open(os.path.join(tmp, "label_set.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["timestamp_folder", "pig_id", "pig_timestamp", "ir_path", "rgb_path"])
+            w.writeheader()
+            w.writerow({"timestamp_folder": "f", "pig_id": 1, "pig_timestamp": "20260213-09-00-11",
+                        "ir_path": "f/pig1_ir_vis_20260213-09-00-11.jpg", "rgb_path": "f/pig1_rgb_20260213-09-00-11.jpg"})
+        counts = register_set(tmp)
+        assert counts["none"] == 0 and sum(counts.values()) == 1
+        with open(os.path.join(tmp, "label_set.csv")) as f:
+            row = next(csv.DictReader(f))
+        assert row["rgb_aligned_path"] == "f/pig1_rgbreg_20260213-09-00-11.jpg"
+        assert cv2.imread(os.path.join(tmp, row["rgb_aligned_path"])).shape == (480, 640, 3)
+        assert os.path.exists(os.path.join(tmp, "label_set_before_rgbreg.csv"))
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_depth_input_stack():
     """ir+depth input: channel 0 is the IR, channel 1 height (128 = level skin, higher on the bump),
     channel 2 shading; missing depth gives a flat, cue-free stack."""
