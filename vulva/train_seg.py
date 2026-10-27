@@ -57,11 +57,17 @@ def load_labels(path, inputs="ir"):
     res = lambda p: p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(base, p)  # noqa: E731
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = [r for r in csv.DictReader(f) if r["label"] in ("present", "absent")]
-    items = []
+    items, unreadable = [], []
     for r in rows:
         r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
-        img = read_input(r["ir_path"], res(r.get("depth_path", "")) or None, inputs)
+        img = None
+        for attempt in range(3):          # network shares (\\tsclient) sometimes fail a read under load
+            img = read_input(r["ir_path"], res(r.get("depth_path", "")) or None, inputs)
+            if img is not None or not os.path.exists(r["ir_path"]):
+                break
+            time.sleep(0.5 * (attempt + 1))
         if img is None:
+            unreadable.append(r["ir_path"])
             continue
         if r["label"] == "present":
             m = read_mask(r["mask_path"])
@@ -71,7 +77,23 @@ def load_labels(path, inputs="ir"):
             m = np.zeros(img.shape[:2], np.uint8)
         g, mk = to_model_space(img, m)
         items.append({"image": g, "mask": mk, "pig_id": int(float(r["pig_id"])), "row": r})
+    if unreadable:
+        print(f"WARNING: {len(unreadable)} labelled frames could not be read and are left out, "
+              f"e.g. {unreadable[0]}", flush=True)
     return items
+
+
+def save_items(items, path):
+    """Loaded frames -> one .npz, so --jobs workers train on exactly these without re-reading the share."""
+    np.savez(path, images=np.stack([it["image"] for it in items]), masks=np.stack([it["mask"] for it in items]),
+             pigs=np.array([it["pig_id"] for it in items]), keys=np.array([it["row"]["ir_path"] for it in items]))
+
+
+def load_items(path):
+    d = np.load(path)
+    images, masks, pigs, keys = d["images"], d["masks"], d["pigs"], d["keys"]
+    return [{"image": images[i], "mask": masks[i], "pig_id": int(pigs[i]), "row": {"ir_path": str(keys[i])}}
+            for i in range(len(keys))]
 
 
 def assign_folds(pigs, k, seed=42):
@@ -249,6 +271,7 @@ def main():
                          "(GPUs shared round-robin; 6 = all at once for 5 folds; lab PC only, at most 2 without CUDA)")
     ap.add_argument("--job", type=int, default=None, help=argparse.SUPPRESS)       # worker: fold k, or folds = final
     ap.add_argument("--job-dir", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--items-cache", default="", help=argparse.SUPPRESS)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
     if args.job is not None:
@@ -336,7 +359,7 @@ def run_job(args):
     torch.manual_seed(seed)
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     log = lambda s: print(s, flush=True)  # noqa: E731
-    items = load_labels(args.labels, args.inputs)
+    items = load_items(args.items_cache) if args.items_cache else load_labels(args.labels, args.inputs)
     if k == args.folds:
         log(f"Final model on all {len(items)} frames ({device})")
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
@@ -367,6 +390,9 @@ def run_parallel(args, items, folds, report, log):
            "--epochs", str(args.epochs), "--batch-size", str(args.batch_size), "--lr", str(args.lr),
            "--pos-weight", str(args.pos_weight), "--inputs", args.inputs, "--seed", str(args.seed),
            "--job-dir", job_dir] + (["--no-pretrained"] if args.no_pretrained else [])
+    cache = os.path.join(job_dir, "items.npz")    # the frames as loaded here: workers do not touch the share
+    save_items(items, cache)
+    cmd += ["--items-cache", cache]
     n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
     names = {k: f"fold{k + 1}" for k in range(args.folds)}
     names[args.folds] = "final"
