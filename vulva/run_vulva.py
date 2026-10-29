@@ -36,7 +36,7 @@ from daily import METRICS, add_baseline_change, aggregate, compare_truth  # noqa
 from measure3d import MEASURE_FIELDS, load_depth_raw, load_intrinsics, measure  # noqa: E402
 from rgb_align import register  # noqa: E402
 from seg_model import ir_channel, load_checkpoint, predict, read_input  # noqa: E402
-from select_frames import parse_windows, select  # noqa: E402
+from select_frames import parse_windows, relocate, select  # noqa: E402
 
 FRAME_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence",
                 "vulva_visible", "vulva_prob", "vulva_conf", "mask_area_px"] + MEASURE_FIELDS + ["ir_path", "mask_path"]
@@ -104,6 +104,10 @@ def main():
     ap.add_argument("--ir-sheet", action="store_true", help="review sheet on the IR image instead of colour")
     ap.add_argument("--save-masks", action="store_true", help="write each predicted mask as PNG")
     ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--data-roots", default="",
+                    help="';'-separated folders holding the timestamp folders, for predictions made before the data "
+                         "moved (frames whose recorded path is gone are looked up here by folder name)")
+    ap.add_argument("--dates", default="", help="comma list of YYYYMMDD to keep (default: all)")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -118,7 +122,13 @@ def main():
     with open(args.predictions, newline="", encoding="utf-8-sig") as f:
         preds = list(csv.DictReader(f))
     cands = select(preds, args.min_conf, parse_windows(args.windows), args.max_per_day)
+    if args.dates:
+        keep = {d.strip() for d in args.dates.split(",") if d.strip()}
+        cands = [c for c in cands if c["pig_timestamp"][:8] in keep]
     print(f"{len(cands)} standing frames selected from {len(preds)} predictions")
+    if args.data_roots:
+        cands, missing = relocate(cands, [r for r in args.data_roots.split(";") if r.strip()])
+        print(f"  {len(cands)} found (moved ones looked up under --data-roots), {missing} not found")
 
     mask_dir = os.path.join(args.out_dir, "masks")
     if args.save_masks:

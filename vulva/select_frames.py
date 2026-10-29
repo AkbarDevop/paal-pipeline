@@ -47,6 +47,46 @@ def depth_path_for(ir_path):
     return os.path.join(d, name.replace("_ir_vis_", "_depth_").rsplit(".", 1)[0] + ".raw")
 
 
+def index_folders(roots):
+    """Timestamp folders (YYYYMMDD-HH-MM-SS) under each root, directly or one level down
+    (e.g. E:\\Pig_data\\Pictures_OAK\\OAK_0206_0211\\<ts>) -> {folder name: full path}."""
+    import re
+    pat = re.compile(r"^\d{8}-\d{2}-\d{2}-\d{2}$")
+    out = {}
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for e in os.scandir(root):
+            if not e.is_dir():
+                continue
+            if pat.match(e.name):
+                out.setdefault(e.name, e.path)
+            else:
+                for e2 in os.scandir(e.path):
+                    if e2.is_dir() and pat.match(e2.name):
+                        out.setdefault(e2.name, e2.path)
+    return out
+
+
+def relocate(picked, roots):
+    """Point frames whose recorded paths no longer exist (data moved since the posture run)
+    at the same timestamp folder under the given roots. Returns (frames found, frames missing)."""
+    index = index_folders(roots)
+    found, missing = [], 0
+    for p in picked:
+        if os.path.exists(p["ir_path"]):
+            found.append(p)
+            continue
+        folder = index.get(p["timestamp_folder"])
+        name = os.path.basename(p["ir_path"].replace("\\", "/"))
+        if folder and os.path.exists(os.path.join(folder, name)):
+            ir = os.path.join(folder, name)
+            found.append(dict(p, ir_path=ir, depth_path=depth_path_for(ir)))
+        else:
+            missing += 1
+    return found, missing
+
+
 def select(pred_rows, min_conf=0.6, windows=None, max_per_day=0):
     picked = []
     for r in pred_rows:

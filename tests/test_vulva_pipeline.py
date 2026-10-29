@@ -150,6 +150,27 @@ def test_select_frames_standing_windows_and_cap():
     assert [p["pig_timestamp"][9:11] for p in one if p["pig_id"] == 0] == ["12"]
 
 
+def test_relocate_finds_frames_after_the_data_moved():
+    """Predictions made before the raw folders moved: frames are found again by timestamp folder name."""
+    from select_frames import relocate
+    tmp = tempfile.mkdtemp()
+    try:
+        new = os.path.join(tmp, "E", "Pictures_OAK", "OAK_0206_0211", "20260209-09-00-00")
+        os.makedirs(new)
+        open(os.path.join(new, "pig3_ir_vis_20260209-09-00-13.jpg"), "wb").close()
+        picked = [{"timestamp_folder": "20260209-09-00-00", "pig_id": 3, "pig_timestamp": "20260209-09-00-13",
+                   "ir_path": "C:\\PAAL_data\\Fed_pig\\Pictures_OAK\\20260209-09-00-00\\pig3_ir_vis_20260209-09-00-13.jpg",
+                   "depth_path": ""},
+                  dict(timestamp_folder="20260209-09-10-00", pig_id=4, pig_timestamp="20260209-09-10-14",
+                       ir_path="C:\\gone\\pig4_ir_vis_20260209-09-10-14.jpg", depth_path="")]
+        found, missing = relocate(picked, [os.path.join(tmp, "E", "Pictures_OAK")])
+        assert missing == 1 and len(found) == 1
+        assert found[0]["ir_path"] == os.path.join(new, "pig3_ir_vis_20260209-09-00-13.jpg")
+        assert found[0]["depth_path"].endswith("pig3_depth_20260209-09-00-13.raw")
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_daily_median_baseline_and_caliper_join():
     frames = []
     for day, base in ((7, 40.0), (8, 40.0), (9, 44.0), (10, 40.0)):

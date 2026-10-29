@@ -22,7 +22,7 @@ python vulva/run_vulva.py <predictions.csv> --truth outputs/vulva/sow_day_truth.
 python vulva/repeatability.py <per-frame csv> --truth outputs/vulva/sow_day_truth.csv
 python vulva/eval_seg.py --model models/vulva_seg_r5.pth --labels <test set>/labels.csv  # blind end-to-end test
 python vulva/register_rgb.py <label set>                            # colour image on the IR grid (labelling + sheets)
-python tests/test_vulva_pipeline.py                                  # 18 synthetic checks
+python tests/test_vulva_pipeline.py                                  # 19 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)
