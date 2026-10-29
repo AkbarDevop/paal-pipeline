@@ -171,6 +171,47 @@ def test_relocate_finds_frames_after_the_data_moved():
         shutil.rmtree(tmp)
 
 
+def test_review_run_panels_and_point_cloud():
+    """review_run.py: panels for a run's frames, and the 3D surface / point cloud around a vulva."""
+    from review_run import local_surface, write_ply
+    from seg_model import VulvaUNet, save_checkpoint
+    depth, mask = render(tilt_deg=30, W=40, L=60, H=12, noise=0.0)
+    surf = local_surface(depth, mask, 320, 260)
+    assert surf is not None
+    u, v, h, vul, pts, ys, xs = surf
+    assert 8 < np.percentile(h[vul], 95) < 16 and abs(np.median(h[~vul])) < 2      # bump on a flat rump
+    tmp = tempfile.mkdtemp()
+    try:
+        write_ply(os.path.join(tmp, "a.ply"), surf, np.full((480, 640), 128, np.uint8))
+        with open(os.path.join(tmp, "a.ply")) as f:
+            head = f.read(400)
+        assert head.startswith("ply") and f"element vertex {len(pts)}" in head
+        rng = np.random.default_rng(2)
+        folder = os.path.join(tmp, "20260124-09-00-00")
+        os.makedirs(folder)
+        rows = []
+        for pid in range(2):
+            ts = f"20260124-09-00-{10 + pid:02d}"
+            _write_frame(folder, pid, ts, True, rng)
+            rows.append({"timestamp_folder": "20260124-09-00-00", "pig_id": pid, "pig_timestamp": ts,
+                         "measure_status": "ok", "width_mm": 40, "length_mm": 60,
+                         "ir_path": os.path.join(folder, f"pig{pid}_ir_vis_{ts}.jpg")})
+        fcsv = os.path.join(tmp, "vulva_frames.csv")
+        with open(fcsv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        ck = os.path.join(tmp, "m.pth")
+        save_checkpoint(VulvaUNet(pretrained=False), ck, {"threshold": 0.5, "min_area": 25, "inputs": "ir"})
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "review_run.py"), fcsv, "--model", ck, "--n", "2"],
+                             capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert len(os.listdir(os.path.join(tmp, "review_ok", "panels"))) == 2
+        assert cv2.imread(os.path.join(tmp, "review_ok", "index.jpg")).shape[1] == 600
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_daily_median_baseline_and_caliper_join():
     frames = []
     for day, base in ((7, 40.0), (8, 40.0), (9, 44.0), (10, 40.0)):
