@@ -200,8 +200,11 @@ def main():
             tiles.append(label(outlined(c, mask, o, col), "colour (matched to IR)"))
         else:
             tiles.append(label(np.full((P, P, 3), 40, np.uint8), "no colour image"))
-        c, o = crop(cv2.cvtColor(cv2.equalizeHist(gray), cv2.COLOR_GRAY2BGR), cx, cy)
-        tiles.append(label(outlined(c, mask, o, col), "IR (what the model sees)"))
+        # local contrast boost for display only (as in the labelling tool); a global histogram
+        # equalisation washes the sow out to white, because the dark stall dominates the frame
+        disp = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
+        c, o = crop(cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR), cx, cy)
+        tiles.append(label(outlined(c, mask, o, col), "IR (contrast-boosted)"))
         v = views_for(dpath)
         if v is not None:
             c, o = crop(cv2.cvtColor(v[1], cv2.COLOR_RGB2BGR), cx, cy)
