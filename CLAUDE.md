@@ -23,7 +23,8 @@ python vulva/repeatability.py <per-frame csv> --truth outputs/vulva/sow_day_trut
 python vulva/eval_seg.py --model models/vulva_seg_r5.pth --labels <test set>/labels.csv  # blind end-to-end test
 python vulva/register_rgb.py <label set>                            # colour image on the IR grid (labelling + sheets)
 python vulva/review_run.py <run>/vulva_frames.csv --model <ckpt> --n 24 --ply 5   # panels: colour | IR | height | 3D, + point clouds
-python tests/test_vulva_pipeline.py                                  # 20 synthetic checks
+python vulva/split_by_sow.py <labels.csv>                           # test / train halves by stall
+python tests/test_vulva_pipeline.py                                  # 21 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

@@ -48,7 +48,10 @@ FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "verdic
 ORDER = {"false alarm": 0, "missed": 1, "dropped by cut": 2, "both visible": 3, "both not visible": 4}
 
 
-def read_rows(labels_csv):
+def read_rows(labels_csv, frames_roots=None):
+    from select_frames import index_folders
+    from train_seg import relocate_row
+    index = index_folders(frames_roots) if frames_roots else {}
     base = os.path.dirname(os.path.abspath(labels_csv))
     res = lambda p: p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(base, p)  # noqa: E731
     with open(labels_csv, newline="", encoding="utf-8-sig") as f:
@@ -62,7 +65,13 @@ def read_rows(labels_csv):
         reg, plain = colour.get(r["ir_path"], ("", ""))
         r["rgb_reg"], r["rgb_plain"] = res(reg), res(plain)
         r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
-        r["depth_path"] = res(r.get("depth_path", "")) or default_depth_path(r["ir_path"])
+        r["depth_path"] = res(r.get("depth_path", ""))
+        relocate_row(r, index)
+        r["depth_path"] = r["depth_path"] or default_depth_path(r["ir_path"])
+        if not (r["rgb_reg"] or r["rgb_plain"]):          # colour image next to the IR, if any
+            d, name = os.path.split(r["ir_path"])
+            cand = os.path.join(d, name.replace("_ir_vis_", "_rgb_").rsplit(".", 1)[0] + ".jpg")
+            r["rgb_plain"] = cand if os.path.exists(cand) else ""
     return rows
 
 
@@ -203,6 +212,8 @@ def main():
     ap.add_argument("--out-dir", default="", help="default: outputs/eval_<model name>")
     ap.add_argument("--calibration", default="", help="calibration.json with tof_intrinsics")
     ap.add_argument("--ir-sheet", action="store_true", help="draw the sheet on the IR image even if colour exists")
+    ap.add_argument("--frames-root", default="",
+                    help="';'-separated raw folders, for labelled frames whose images are not next to the labels")
     args = ap.parse_args()
 
     name = os.path.splitext(os.path.basename(args.model))[0]
@@ -210,7 +221,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model, ckpt = load_checkpoint(args.model, device)
-    rows = read_rows(args.labels)
+    rows = read_rows(args.labels, [r for r in args.frames_root.split(";") if r.strip()])
     if not rows:
         sys.exit(f"No labelled frames in {args.labels}")
     frames = evaluate(model, ckpt, rows, device, load_intrinsics(args.calibration))

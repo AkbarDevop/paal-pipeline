@@ -44,44 +44,74 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, blob_confidence, largest_component,  # noqa: E402
                        read_input, read_mask, save_checkpoint, to_model_space, to_tensor)
+from select_frames import index_folders  # noqa: E402
 
 MIN_AREA = 25    # model pixels; smaller blobs count as "no vulva"
+SCALE_AUG = (0.9, 1.1)   # random zoom range in training (--scale-aug); below 1 = sow farther away
 
 
-def load_labels(path, inputs="ir"):
-    """Label CSV from make_seg_labels.py or label_ellipse.py. Relative paths are
-    resolved against the CSV's folder, so a label set can move between computers.
-    With inputs="ir+depth" the depth file is taken from a depth_path column or,
-    without one, from the IR file name (pigN_depth_<ts>.raw next to the IR)."""
-    base = os.path.dirname(os.path.abspath(path))
-    res = lambda p: p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(base, p)  # noqa: E731
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        rows = [r for r in csv.DictReader(f) if r["label"] in ("present", "absent")]
-    items, unreadable = [], []
-    for r in rows:
-        r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
-        img = None
-        for attempt in range(3):          # network shares (\\tsclient) sometimes fail a read under load
-            img = read_input(r["ir_path"], res(r.get("depth_path", "")) or None, inputs)
-            if img is not None or not os.path.exists(r["ir_path"]):
-                break
-            time.sleep(0.5 * (attempt + 1))
-        if img is None:
-            unreadable.append(r["ir_path"])
-            continue
-        if r["label"] == "present":
-            m = read_mask(r["mask_path"])
-            if m is None or m.sum() == 0:
+def relocate_row(r, index):
+    """A labelled frame whose image is not where the CSV says (e.g. only labels.csv and masks/
+    were copied to this computer): find it by timestamp folder under --frames-root."""
+    if not index or os.path.exists(r["ir_path"]):
+        return False
+    folder = index.get(r.get("timestamp_folder", ""))
+    if not folder:
+        return False
+    cand = os.path.join(folder, os.path.basename(r["ir_path"].replace("\\", "/")))
+    if not os.path.exists(cand):
+        return False
+    r["ir_path"], r["depth_path"] = cand, ""
+    return True
+
+
+def load_labels(paths, inputs="ir", frames_roots=None):
+    """Label CSV(s) from make_seg_labels.py or label_ellipse.py. Relative paths are
+    resolved against each CSV's folder, so a label set can move between computers; with
+    frames_roots, frames not found there are looked up by timestamp folder, so labels.csv +
+    masks/ are enough and the images come from the raw share. With inputs="ir+depth" the
+    depth file is taken from a depth_path column or, without one, from the IR file name."""
+    paths = [paths] if isinstance(paths, str) else list(paths)
+    index = index_folders(frames_roots) if frames_roots else {}
+    items, unreadable, moved = [], [], 0
+    for path in paths:
+        before = len(items)
+        base = os.path.dirname(os.path.abspath(path))
+
+        def res(p, b=base):
+            return p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(b, p)
+
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = [r for r in csv.DictReader(f) if r["label"] in ("present", "absent")]
+        for r in rows:
+            r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
+            r["depth_path"] = res(r.get("depth_path", ""))
+            moved += relocate_row(r, index)
+            img = None
+            for attempt in range(3):          # network shares (\\tsclient) sometimes fail a read under load
+                img = read_input(r["ir_path"], r["depth_path"] or None, inputs)
+                if img is not None or not os.path.exists(r["ir_path"]):
+                    break
+                time.sleep(0.5 * (attempt + 1))
+            if img is None:
+                unreadable.append(r["ir_path"])
                 continue
-        else:
-            m = np.zeros(img.shape[:2], np.uint8)
-        g, mk = to_model_space(img, m)
-        items.append({"image": g, "mask": mk, "pig_id": int(float(r["pig_id"])), "row": r})
+            if r["label"] == "present":
+                m = read_mask(r["mask_path"])
+                if m is None or m.sum() == 0:
+                    continue
+            else:
+                m = np.zeros(img.shape[:2], np.uint8)
+            g, mk = to_model_space(img, m)
+            items.append({"image": g, "mask": mk, "pig_id": int(float(r["pig_id"])), "row": r})
+        if len(paths) > 1:
+            print(f"  {path}: {len(items) - before} frames", flush=True)
+    if moved:
+        print(f"  {moved} frames read from --frames-root (not next to their labels)", flush=True)
     if unreadable:
         print(f"WARNING: {len(unreadable)} labelled frames could not be read and are left out, "
               f"e.g. {unreadable[0]}", flush=True)
     return items
-
 
 def save_items(items, path):
     """Loaded frames -> one .npz, so --jobs workers train on exactly these without re-reading the share."""
@@ -116,7 +146,7 @@ class SegData(Dataset):
             if random.random() < 0.5:
                 g, m = g[:, ::-1].copy(), m[:, ::-1].copy()
             ang = random.uniform(-8, 8)
-            sc = random.uniform(0.9, 1.1)
+            sc = random.uniform(*SCALE_AUG)
             tx, ty = random.uniform(-0.05, 0.05) * SEG_W, random.uniform(-0.05, 0.05) * SEG_H
             A = cv2.getRotationMatrix2D((SEG_W / 2, SEG_H / 2), ang, sc)
             A[:, 2] += (tx, ty)
@@ -249,7 +279,13 @@ def score(items, preds):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--labels", default=os.path.join("labels", "vulva_seg_labels.csv"))
+    ap.add_argument("--labels", nargs="+", default=[os.path.join("labels", "vulva_seg_labels.csv")],
+                    help="one or more label CSVs (e.g. February + January), trained on together")
+    ap.add_argument("--frames-root", default="",
+                    help="';'-separated folders with the raw timestamp folders, for labelled frames whose images "
+                         "are not next to their labels (only labels.csv + masks/ copied)")
+    ap.add_argument("--scale-aug", default="0.9,1.1",
+                    help="random zoom range in training, e.g. 0.75,1.15 so far-away sows are covered")
     ap.add_argument("--folds", type=int, default=5, help="0 = skip cross-validation")
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -274,6 +310,9 @@ def main():
     ap.add_argument("--items-cache", default="", help=argparse.SUPPRESS)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+    global SCALE_AUG
+    SCALE_AUG = tuple(float(v) for v in args.scale_aug.split(","))
+    args.frames_roots = [r for r in args.frames_root.split(";") if r.strip()]
     if args.job is not None:
         return run_job(args)
 
@@ -289,7 +328,7 @@ def main():
         log_lines.append(s)
 
     t0 = time.time()
-    items = load_labels(args.labels, args.inputs)
+    items = load_labels(args.labels, args.inputs, args.frames_roots)
     pigs = sorted({it["pig_id"] for it in items})
     n_pos = int(sum(bool(it["mask"].any()) for it in items))
     log(f"{len(items)} frames from {len(pigs)} sows: {n_pos} with a vulva mask, {len(items) - n_pos} without"
@@ -298,7 +337,7 @@ def main():
         sys.exit("No vulva masks found; check --labels and the mask paths.")
 
     report = {"labels": args.labels, "frames": len(items), "present": n_pos, "sows": pigs,
-              "epochs": args.epochs, "device": device, "inputs": args.inputs}
+              "epochs": args.epochs, "device": device, "inputs": args.inputs, "scale_aug": args.scale_aug}
     if args.folds and len(pigs) >= args.folds:
         folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
         report["folds"] = {str(k): sorted(p for p, f in folds.items() if f == k) for k in range(args.folds)}
@@ -335,7 +374,7 @@ def main():
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
                             args.pos_weight)
     save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold, "inputs": args.inputs,
-                                            "presence_threshold": presence,
+                                            "presence_threshold": presence, "scale_aug": args.scale_aug,
                                             "trained_on": len(items), "sows": pigs,
                                             "date": time.strftime("%Y-%m-%d")})
     log(f"Saved {args.out_model}  ({time.time() - t0:.0f} s)")
@@ -359,7 +398,8 @@ def run_job(args):
     torch.manual_seed(seed)
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     log = lambda s: print(s, flush=True)  # noqa: E731
-    items = load_items(args.items_cache) if args.items_cache else load_labels(args.labels, args.inputs)
+    items = load_items(args.items_cache) if args.items_cache else load_labels(args.labels, args.inputs,
+                                                                               args.frames_roots)
     if k == args.folds:
         log(f"Final model on all {len(items)} frames ({device})")
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
@@ -386,10 +426,10 @@ def run_parallel(args, items, folds, report, log):
     for f in os.listdir(job_dir):
         if f.endswith((".npz", ".pt", ".log")):
             os.remove(os.path.join(job_dir, f))
-    cmd = [sys.executable, os.path.abspath(__file__), "--labels", args.labels, "--folds", str(args.folds),
+    cmd = [sys.executable, os.path.abspath(__file__), "--labels", *args.labels, "--folds", str(args.folds),
            "--epochs", str(args.epochs), "--batch-size", str(args.batch_size), "--lr", str(args.lr),
            "--pos-weight", str(args.pos_weight), "--inputs", args.inputs, "--seed", str(args.seed),
-           "--job-dir", job_dir] + (["--no-pretrained"] if args.no_pretrained else [])
+           "--job-dir", job_dir, "--scale-aug", args.scale_aug] + (["--no-pretrained"] if args.no_pretrained else [])
     cache = os.path.join(job_dir, "items.npz")    # the frames as loaded here: workers do not touch the share
     save_items(items, cache)
     cmd += ["--items-cache", cache]

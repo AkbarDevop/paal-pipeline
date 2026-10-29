@@ -212,6 +212,46 @@ def test_review_run_panels_and_point_cloud():
         shutil.rmtree(tmp)
 
 
+def test_two_label_sets_frames_root_and_sow_split():
+    """Training on several label CSVs; labels.csv + masks/ alone, images found under --frames-root;
+    split_by_sow keeps every sow on one side."""
+    from split_by_sow import split
+    from train_seg import load_labels
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(4)
+        raw = os.path.join(tmp, "share", "OAK_0124", "20260124-09-00-00")
+        os.makedirs(raw)
+        sets = []
+        for k, pids in enumerate(((0, 1), (2, 3))):
+            d = os.path.join(tmp, f"set{k}")
+            os.makedirs(os.path.join(d, "masks"))
+            rows = []
+            for pid in pids:
+                ts = f"20260124-09-00-{10 + pid:02d}"
+                m = _write_frame(raw, pid, ts, True, rng)
+                mp = f"masks/{pid}.png"
+                cv2.imwrite(os.path.join(d, mp), m.astype(np.uint8) * 255)
+                rows.append({"ir_path": f"20260124-09-00-00/pig{pid}_ir_vis_{ts}.jpg", "mask_path": mp,
+                             "label": "present", "pig_id": pid, "timestamp_folder": "20260124-09-00-00",
+                             "pig_timestamp": ts})
+            with open(os.path.join(d, "labels.csv"), "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                w.writeheader()
+                w.writerows(rows)
+            sets.append(os.path.join(d, "labels.csv"))
+        assert load_labels(sets) == []                                       # images not next to the labels
+        items = load_labels(sets, "ir", [os.path.join(tmp, "share")])
+        assert sorted(it["pig_id"] for it in items) == [0, 1, 2, 3] and all(it["mask"].any() for it in items)
+        items_d = load_labels(sets, "ir+depth", [os.path.join(tmp, "share")])  # depth found next to the moved IR
+        assert len(items_d) == 4 and items_d[0]["image"].ndim == 3
+        rows = [{"pig_id": str(p), "label": "present"} for p in (1, 1, 2, 3, 3, 3, 4, 5)]
+        test, train, ts, tr = split(rows, 0.5, 42)
+        assert set(ts).isdisjoint(tr) and len(test) + len(train) == len(rows) and len(ts) == 2
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_daily_median_baseline_and_caliper_join():
     frames = []
     for day, base in ((7, 40.0), (8, 40.0), (9, 44.0), (10, 40.0)):
