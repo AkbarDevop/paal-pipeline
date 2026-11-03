@@ -878,6 +878,49 @@ def test_pick_hard_frames_buckets_holdouts_and_export():
         shutil.rmtree(tmp)
 
 
+def test_retune_cut_on_normal_frames_only():
+    """retune_cut.py: hand-picked hard frames (tails at high confidence) push the cut up; left out,
+    the cut set on the normal frames is lower and keeps more vulvas; a checkpoint copy gets it."""
+    from retune_cut import at_cut, cut_for, read_cv
+    tmp = tempfile.mkdtemp()
+    try:
+        rows, hard = [], []
+        for i in range(60):                                    # normal: vulvas 0.95-0.999, absent mostly undrawn
+            rows.append({"pig_id": i % 10, "pig_timestamp": f"n{i}", "label": "present", "pred_area_px": 300,
+                         "blob_conf": 0.95 + 0.049 * (i / 59)})
+            rows.append({"pig_id": i % 10, "pig_timestamp": f"a{i}", "label": "absent",
+                         "pred_area_px": 200 if i < 6 else 0, "blob_conf": 0.96 if i < 6 else 0})
+        for i in range(30):                                    # hand-picked: tails drawn with high confidence
+            rows.append({"pig_id": i % 10, "pig_timestamp": f"h{i}", "label": "absent", "pred_area_px": 250,
+                         "blob_conf": 0.95 + 0.04 * (i / 29)})
+            hard.append({"pig_id": i % 10, "pig_timestamp": f"h{i}"})
+        cv = os.path.join(tmp, "cv_predictions.csv")
+        with open(cv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        lab = os.path.join(tmp, "labels.csv")
+        with open(lab, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["pig_id", "pig_timestamp"])
+            w.writeheader()
+            w.writerows(hard)
+        excl = {(str(h["pig_id"]), h["pig_timestamp"]) for h in hard}
+        c_all, c_norm = cut_for(read_cv(cv), 0.9), cut_for(read_cv(cv, excl), 0.9)
+        assert c_norm < c_all, (c_norm, c_all)
+        assert at_cut(read_cv(cv, excl), c_norm)["recall"] > at_cut(read_cv(cv, excl), c_all)["recall"]
+        import torch
+        ck, ck2 = os.path.join(tmp, "m.pth"), os.path.join(tmp, "m2.pth")
+        torch.save({"presence_threshold": c_all, "state_dict": {}}, ck)
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "retune_cut.py"), cv, "--model", ck,
+                              "--exclude-labels", lab, "--write", ck2], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        saved = torch.load(ck2, weights_only=False)
+        assert saved["presence_threshold"] == c_norm and saved["presence_threshold_train_all"] == c_all
+        assert torch.load(ck, weights_only=False)["presence_threshold"] == c_all        # original untouched
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):

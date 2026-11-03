@@ -11,7 +11,7 @@ New scripts in `vulva/`, all reading raw folders only and writing under `outputs
 - `daily.py`, `run_vulva.py`: one command from posture predictions to one value per sow per day, compared with the calipers and heat days.
 - `repeatability.py`: within-day noise of any per-frame table and how many frames a daily value needs.
 - `export_label_set.py`, `label_ellipse.py`: copy standing frames out of the raw share and label them with three clicks per vulva (or one key for not visible); `train_seg.py` reads the label set's relative paths.
-- `tests/test_vulva_pipeline.py`: 24 synthetic checks.
+- `tests/test_vulva_pipeline.py`: 25 synthetic checks.
 - `estrus/sow_days.py`, `estrus/evaluate.py`: the sow-day table for the heat model (night transitions, standing share, days since move, heat, vulva when available, each as change from the sow's own first days) and a leave-one-sow-out check of which inputs pick out heat days, with days-since-move alone as the reference. `tests/test_estrus_baseline.py`: 4 checks.
 
 ### Findings that shaped it (2026-10-10)
@@ -62,6 +62,15 @@ New scripts in `vulva/`, all reading raw folders only and writing under `outputs
 - r8 on all standing frames (2026-11-03, CAFNR PC, `outputs\\vulva_r8_long`, 26 min): 31,233 standing frames Jan 23 – Mar 12; vulva kept in 11,183 (36%), 4,637 more drawn but dropped as unsure (15%), nothing drawn in the rest; 11,155 measured; 612 sow-days with at least 3 good frames.
 - `pick_hard_frames.py` (active learning for r9): picks the frames worth labelling from a run, in four groups (unsure = drawn but dropped, borderline = kept just above the cut, nothing = no outline, sure = high confidence), spread round-robin over sows and days, never from held-out test days (`--hold-out-dates`), test sows (`--hold-out 6,7,...@dates`) or frames already labelled (`--exclude-labels`). It writes a predictions-style CSV for `export_label_set.py`, which now also takes `--data-roots` for predictions made before the data moved. One new test (24 in all).
 - `review_run.py` contact sheets: `sheet_01.jpg`, `sheet_02.jpg`, ... show 48 frames per page (colour image, the model's outline, pig, date, time and confidence on each tile) for fast checking by eye; `--sheet-only` writes just these, so a few hundred frames take a minute. Frames where the model drew nothing are shown with a wide view of the rear, so a missed vulva is visible.
+- r9 (2026-11-03, CAFNR PC, 40 min): r8's recipe plus 150 hand-picked frames from the r8 run (`pick_hard_frames.py`: 90 unsure, 40 borderline, 20 nothing drawn; labelled without suggestions: 91 visible, 59 not, 51 of them tail). 567 training frames. Akbar's labels of the picks: of the 90 frames r8 drew but dropped, 55 were real vulvas and 31 tails; of 40 kept just above the cut, 5 were tails; of 20 with nothing drawn, 1 was a missed vulva. CV (harder now, so not comparable with r8's): before the cut precision 0.74, recall 0.96; with its cut 0.9811 precision 0.90, recall 0.56. Blind tests, r9 vs r8:
+
+  | | Feb kept P / R | Feb before cut: vulvas found, false alarms | Jan kept P / R | Feb IoU (median) | Feb width, length bias |
+  |---|---|---|---|---|---|
+  | r8 | 0.97 / 0.87 (83 of 95) | 94 of 95, 15 of 53 | 1.00 / 0.57 (16 of 28) | 0.67 (0.69) | −7.3, −11.2 mm |
+  | r9 | 0.96 / 0.78 (74 of 95) | 95 of 95, 19 of 53 | 1.00 / 0.46 (13 of 28) | 0.70 (0.70) | −6.0, −8.6 mm |
+
+  r9 outlines are better (IoU up, sizes 1–3 mm closer to the hand outlines, every February vulva found before the cut), but it keeps fewer vulvas: its cut was set on training frames that now include 51 tails picked on purpose, which pushes it up. r8 stays in use until the cut is re-set (`retune_cut.py`).
+- `retune_cut.py`: re-sets a model's confidence cut from its saved cross-validation predictions, on the normally sampled frames only (hand-picked frames left out with `--exclude-labels`), without retraining; prints the precision / recall trade-off for several targets and writes a checkpoint copy with the new cut. Blind tests are not used. One new test (25 in all).
 - `size_vs_caliper.py`: per sow-day medians of hand outlines, kept model outlines (from eval_frames.csv) or a run (vulva_frames.csv) against the calipers (`truth.py`): median ratio camera / caliper, mean difference, mean absolute difference, r across sow-days and r within a sow (the day-to-day changes heat detection needs). Two new tests.
   before the cut, r7 finds 94 of 95 real vulvas with 18 false alarms in 53 frames (r5: 28), so the tail labels taught it part of the rule;
   with the cut, it keeps 73 of 95 (r5: 94) with 5 false alarms (r5: 20), so precision is 0.94 (r5: 0.83), recall 0.77, specificity 0.91.
