@@ -692,7 +692,7 @@ def test_eval_seg_scores_a_model_end_to_end():
             "false alarm", "missed", "dropped by cut", "both visible", "both not visible"}
         assert all(f["human_status"] == "ok" for f in frames if f["label"] == "present")
         assert abs(float(frames[0]["human_width_mm"]) - 40) < 8          # hand mask measured on the depth
-        report = summarise(frames, 0.0)
+        report = summarise(frames, {"conf_high": 0.0, "conf_low": 0.0, "min_peak_mm": 0.0})
         assert report[0].startswith("4 labelled frames: 3 with a visible vulva, 1 without")
         from seg_model import save_checkpoint
         ck = os.path.join(tmp, "m.pth")
@@ -702,6 +702,119 @@ def test_eval_seg_scores_a_model_end_to_end():
         assert out.returncode == 0, out.stderr[-2000:]
         assert all(os.path.exists(os.path.join(tmp, "ev", n)) for n in ("eval_report.txt", "eval_frames.csv",
                                                                          "eval_sheet.jpg"))
+        with open(os.path.join(tmp, "ev", "eval_frames.csv")) as f:
+            assert "model_peak_height_mm" in next(csv.reader(f))       # keep_rule.py tunes on it
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_keep_rule_bump_check_tunes_applies_and_saves():
+    """keep_rule.py: a fairly sure blob on a bump is kept, a fairly sure flat one is not; the rule is
+    tuned on two tests, saved into a checkpoint copy and re-applied to a run's vulva_frames.csv."""
+    from keep_rule import apply_to_run, keep, rule_from_checkpoint, score, tune
+    old = rule_from_checkpoint({"presence_threshold": 0.98})
+    assert old == {"conf_high": 0.98, "conf_low": 0.98, "min_peak_mm": 0.0}
+    rule = {"conf_high": 0.98, "conf_low": 0.7, "min_peak_mm": 6.0}
+    assert keep(0.99, None, False, rule) and keep(0.8, 9.0, True, rule)
+    assert not keep(0.8, 3.0, True, rule) and not keep(0.8, 9.0, False, rule) and not keep(0.5, 9.0, True, rule)
+
+    def make_test(seed, n=60):
+        rng = np.random.default_rng(seed)
+        out = []
+        for i in range(n):                       # real vulvas: half sure, half only fairly sure, all on a bump
+            out.append({"present": True, "blob": True, "conf": float(rng.uniform(0.985, 1.0) if i % 2 else
+                                                                      rng.uniform(0.75, 0.97)),
+                        "peak": float(rng.uniform(7, 15)), "measured": True, "iou": 0.7, "tail": False})
+        for i in range(n):                       # tails and skin: fairly sure but flat, a few very sure
+            out.append({"present": False, "blob": i % 3 != 0, "conf": float(rng.uniform(0.75, 0.97) if i % 10
+                                                                            else 0.99),
+                        "peak": float(rng.uniform(0, 4)), "measured": True, "iou": None, "tail": True})
+        return out
+    tests = [make_test(1), make_test(2)]
+    tuned = tune(tests, precision=0.9)
+    assert tuned["conf_low"] < tuned["conf_high"] and 4 <= tuned["min_peak_mm"] <= 7, tuned
+    for t in tests:
+        a, b = score(t, old), score(t, tuned)
+        assert b["recall"] > a["recall"] + 0.3 and b["precision"] >= 0.9, (a, b)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        evs = []
+        for k, t in enumerate(tests):            # the same frames as eval_seg.py would write them
+            p = os.path.join(tmp, f"ev{k}", "eval_frames.csv")
+            os.makedirs(os.path.dirname(p))
+            with open(p, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=["label", "note", "model_visible_before_cut", "blob_conf",
+                                                  "model_peak_height_mm", "model_status", "iou"])
+                w.writeheader()
+                for fr in t:
+                    w.writerow({"label": "present" if fr["present"] else "absent", "note": "tail" * fr["tail"],
+                                "model_visible_before_cut": int(fr["blob"]), "blob_conf": fr["conf"],
+                                "model_peak_height_mm": fr["peak"], "model_status": "ok",
+                                "iou": fr["iou"] if fr["iou"] is not None else ""})
+            evs.append(p)
+        import torch
+        ck, ck2 = os.path.join(tmp, "m.pth"), os.path.join(tmp, "m_keep.pth")
+        torch.save({"presence_threshold": 0.98, "state_dict": {}}, ck)
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "keep_rule.py"), *evs, "--model", ck,
+                              "--precision", "0.9", "--write", ck2], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert "Carry-over check" in out.stdout and "tail frames kept" in out.stdout
+        saved = torch.load(ck2, weights_only=False)
+        assert saved["keep_rule"]["conf_low"] == tuned["conf_low"] and saved["presence_threshold"] == 0.98
+        assert "keep_rule" not in torch.load(ck, weights_only=False)        # original untouched
+
+        # re-apply to a run: a dropped blob on a bump comes back, a flat one stays dropped
+        run = os.path.join(tmp, "vulva_frames.csv")
+        base = {"timestamp_folder": "20260213-09-00-00", "pig_id": 1, "width_mm": 40, "length_mm": 70,
+                "plane_rmse_mm": 1, "view_angle_deg": 10, "depth_coverage": 0.9}
+        rows = [dict(base, pig_timestamp=f"t{i}", vulva_visible=0, vulva_conf=0.85, peak_height_mm=10,
+                     measure_status="low_confidence", blob_status="ok") for i in range(3)]
+        rows += [dict(base, pig_timestamp="flat", vulva_visible=0, vulva_conf=0.85, peak_height_mm=1,
+                      measure_status="low_confidence", blob_status="ok"),
+                 dict(base, pig_timestamp="none", vulva_visible=0, vulva_conf=0, measure_status="not_visible")]
+        with open(run, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=sorted({k for r in rows for k in r}))
+            w.writeheader()
+            w.writerows(rows)
+        kept, n, days = apply_to_run(run, tuned)
+        assert (kept, n, days) == (3, 5, 1)
+        with open(os.path.join(tmp, "vulva_frames_rekept.csv")) as f:
+            st = {r["pig_timestamp"]: r["measure_status"] for r in csv.DictReader(f)}
+        assert st == {"t0": "ok", "t1": "ok", "t2": "ok", "flat": "low_confidence", "none": "not_visible"}
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_size_vs_caliper_ratios_and_within_sow_tracking():
+    """size_vs_caliper.py: hand outlines 15% big and a model that tracks the calipers come out as such."""
+    from size_vs_caliper import compare, sources_from
+    rng = np.random.default_rng(3)
+    truth, rows = {}, []
+    for pig in range(6):
+        for d in range(6, 12):
+            date = f"2026-02-{d:02d}"
+            w, l = 38 + pig + (d - 6) * 1.5, 70 + 2 * pig + (d - 6) * 2.5      # each sow grows towards heat
+            truth[(pig, date)] = (w, l)
+            for k in range(2):
+                rows.append({"timestamp_folder": f"202602{d:02d}-09-00-00", "pig_id": pig, "label": "present",
+                             "human_status": "ok", "human_width_mm": w * 1.15 + rng.normal(0, 0.5),
+                             "human_length_mm": l * 1.15 + rng.normal(0, 0.5), "model_visible": 1,
+                             "model_status": "ok", "model_width_mm": w + rng.normal(0, 0.5),
+                             "model_length_mm": l + rng.normal(0, 0.5)})
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, "ev", "eval_frames.csv")
+        os.makedirs(os.path.dirname(p))
+        with open(p, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        (hn, hand, _), (mn, model, _) = sources_from(p)
+        _, sh = compare(hand, truth)
+        _, sm = compare(model, truth)
+        assert sh["sow_days"] == 36 and abs(sh["width_mm"]["ratio"] - 1.15) < 0.02, sh
+        assert abs(sm["length_mm"]["ratio"] - 1.0) < 0.02 and sm["length_mm"]["within_r"] > 0.9, sm
     finally:
         shutil.rmtree(tmp)
 

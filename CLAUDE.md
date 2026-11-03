@@ -24,7 +24,9 @@ python vulva/eval_seg.py --model models/vulva_seg_r5.pth --labels <test set>/lab
 python vulva/register_rgb.py <label set>                            # colour image on the IR grid (labelling + sheets)
 python vulva/review_run.py <run>/vulva_frames.csv --model <ckpt> --n 24 --ply 5   # panels: colour | IR | height | 3D, + point clouds
 python vulva/split_by_sow.py <labels.csv>                           # test / train halves by stall
-python tests/test_vulva_pipeline.py                                  # 21 synthetic checks
+python vulva/keep_rule.py <eval A>/eval_frames.csv <eval B>/eval_frames.csv --model <ckpt> --write <ckpt with rule>  # keep/drop: confidence + bump
+python vulva/size_vs_caliper.py outputs/vulva/sow_day_truth.csv <eval>/eval_frames.csv <run>/vulva_frames.csv   # which outline size is right
+python tests/test_vulva_pipeline.py                                  # 23 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

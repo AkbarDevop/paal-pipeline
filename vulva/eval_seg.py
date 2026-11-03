@@ -6,7 +6,8 @@ outline threshold, minimum area and confidence cut), and both the model's mask a
 hand-drawn one are measured in mm from the same depth frame (measure3d.py). So this
 checks the whole chain the daily values come from:
 
-  - visible or not: precision, recall, specificity, confusion matrix, with and without the cut
+  - visible or not: precision, recall, specificity, confusion matrix, with and without the keep
+    decision (keep_rule.py: the confidence cut, plus the bump check when a rule is tuned)
   - outline: IoU on frames both call visible
   - size: width and length in mm from the model's mask minus from the hand-drawn mask
 
@@ -14,7 +15,7 @@ Writes, under --out-dir:
   eval_frames.csv   one row per frame (verdict, confidence, IoU, both sizes)
   eval_report.txt   the numbers above
   eval_sheet.jpg    every frame, mistakes first; hand outline green, model outline yellow
-                    (orange when the confidence cut dropped it), drawn on the colour image when
+                    (orange when the keep decision dropped it), drawn on the colour image when
                     the set has one (register_rgb.py, or matched on the fly), else on the IR
 
 Label the test frames by hand without model suggestions, or the test is not independent:
@@ -40,11 +41,13 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 from measure3d import load_depth_raw, load_intrinsics, measure  # noqa: E402
 from rgb_align import register  # noqa: E402
+from keep_rule import keep, rule_from_checkpoint  # noqa: E402
 from seg_model import default_depth_path, ir_channel, load_checkpoint, predict, read_input, read_mask  # noqa: E402
 
-FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "verdict", "model_visible",
+FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "note", "how", "verdict", "model_visible",
           "model_visible_before_cut", "blob_conf", "iou", "human_width_mm", "model_width_mm",
-          "human_length_mm", "model_length_mm", "human_status", "model_status", "ir_path"]
+          "human_length_mm", "model_length_mm", "human_peak_height_mm", "model_peak_height_mm",
+          "model_mean_height_mm", "model_area_mm2", "model_distance_mm", "human_status", "model_status", "ir_path"]
 ORDER = {"false alarm": 0, "missed": 1, "dropped by cut": 2, "both visible": 3, "both not visible": 4}
 
 
@@ -77,7 +80,7 @@ def read_rows(labels_csv, frames_roots=None):
 
 def evaluate(model, ckpt, rows, device, K=None):
     thr, min_area = ckpt.get("threshold", 0.5), ckpt.get("min_area", 25)
-    cut, inputs = ckpt.get("presence_threshold", 0.0), ckpt.get("inputs", "ir")
+    rule, inputs = rule_from_checkpoint(ckpt), ckpt.get("inputs", "ir")
     out = []
     for r in rows:
         img = read_input(r["ir_path"], r["depth_path"], inputs)
@@ -88,23 +91,29 @@ def evaluate(model, ckpt, rows, device, K=None):
             continue
         mask, _pmax, _area, conf = predict(model, [img], device, thr, min_area)[0]
         before = bool(mask.any())
-        visible = before and conf >= cut
         truth = r["label"] == "present"
-        verdict = ("both visible" if truth and visible else "dropped by cut" if truth and before else
-                   "missed" if truth else "false alarm" if visible else "both not visible")
         depth = load_depth_raw(r["depth_path"]) if os.path.exists(r["depth_path"]) else None
         hm = measure(depth, human, K) if truth else {}
         mm = measure(depth, mask, K) if before else {}
+        measured = mm.get("measure_status") == "ok"
+        visible = before and keep(conf, mm.get("peak_height_mm") if measured else None, measured, rule)
+        verdict = ("both visible" if truth and visible else "dropped by cut" if truth and before else
+                   "missed" if truth else "false alarm" if visible else "both not visible")
         iou = ""
         if truth and before:
             t, p = human.astype(bool), mask.astype(bool)
             iou = round(float((t & p).sum() / (t | p).sum()), 4)
         out.append({"timestamp_folder": r.get("timestamp_folder", ""), "pig_id": r.get("pig_id", ""),
-                    "pig_timestamp": r.get("pig_timestamp", ""), "label": r["label"], "how": r.get("how", ""),
+                    "pig_timestamp": r.get("pig_timestamp", ""), "label": r["label"], "note": r.get("note", ""),
+                    "how": r.get("how", ""),
                     "verdict": verdict, "model_visible": int(visible), "model_visible_before_cut": int(before),
                     "blob_conf": round(conf, 4), "iou": iou,
                     "human_width_mm": hm.get("width_mm", ""), "model_width_mm": mm.get("width_mm", ""),
                     "human_length_mm": hm.get("length_mm", ""), "model_length_mm": mm.get("length_mm", ""),
+                    "human_peak_height_mm": hm.get("peak_height_mm", ""),
+                    "model_peak_height_mm": mm.get("peak_height_mm", ""),
+                    "model_mean_height_mm": mm.get("mean_height_mm", ""), "model_area_mm2": mm.get("area_mm2", ""),
+                    "model_distance_mm": mm.get("distance_mm", ""),
                     "human_status": hm.get("measure_status", ""), "model_status": mm.get("measure_status", ""),
                     "ir_path": r["ir_path"], "_ir": ir_channel(img), "_human": human, "_model": mask,
                     "_rgb": (r.get("rgb_reg", ""), r.get("rgb_plain", ""))})
@@ -131,7 +140,7 @@ def colour_view(f):
     return None
 
 
-def summarise(frames, cut):
+def summarise(frames, rule):
     def conf_at(key):
         tp = sum(1 for f in frames if f["label"] == "present" and f[key])
         fn = sum(1 for f in frames if f["label"] == "present" and not f[key])
@@ -143,7 +152,9 @@ def summarise(frames, cut):
 
     lines = [f"{len(frames)} labelled frames: {sum(f['label'] == 'present' for f in frames)} with a visible vulva, "
              f"{sum(f['label'] == 'absent' for f in frames)} without"]
-    for name, key in ((f"With the confidence cut ({cut}, as run_vulva.py uses it)", "model_visible"),
+    how = (f"conf >= {rule['conf_high']}, or conf >= {rule['conf_low']} and bump >= {rule['min_peak_mm']} mm"
+           if rule["conf_low"] < rule["conf_high"] else f"confidence cut {rule['conf_high']}")
+    for name, key in ((f"Kept ({how}, as run_vulva.py decides)", "model_visible"),
                       ("Before the cut", "model_visible_before_cut")):
         tp, fn, fp, tn, p, r, s, f1 = conf_at(key)
         lines += [f"{name}:",
@@ -225,7 +236,7 @@ def main():
     if not rows:
         sys.exit(f"No labelled frames in {args.labels}")
     frames = evaluate(model, ckpt, rows, device, load_intrinsics(args.calibration))
-    lines = [f"Model {args.model} on {args.labels}"] + summarise(frames, ckpt.get("presence_threshold", 0.0))
+    lines = [f"Model {args.model} on {args.labels}"] + summarise(frames, rule_from_checkpoint(ckpt))
     print("\n".join(lines))
     with open(os.path.join(out_dir, "eval_report.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -235,7 +246,7 @@ def main():
         w.writerows(frames)
     save_sheet(frames, os.path.join(out_dir, "eval_sheet.jpg"), colour=not args.ir_sheet)
     print(f"Outputs in {out_dir} (eval_sheet.jpg: mistakes first; hand outline green, model yellow, "
-          f"orange = dropped by the confidence cut)")
+          f"orange = dropped by the keep decision)")
 
 
 if __name__ == "__main__":

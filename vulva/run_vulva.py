@@ -33,13 +33,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 from daily import METRICS, add_baseline_change, aggregate, compare_truth  # noqa: E402
+from keep_rule import keep as keep_blob, rule_from_checkpoint  # noqa: E402
 from measure3d import MEASURE_FIELDS, load_depth_raw, load_intrinsics, measure  # noqa: E402
 from rgb_align import register  # noqa: E402
 from seg_model import ir_channel, load_checkpoint, predict, read_input  # noqa: E402
 from select_frames import parse_windows, relocate, select  # noqa: E402
 
 FRAME_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence",
-                "vulva_visible", "vulva_prob", "vulva_conf", "mask_area_px"] + MEASURE_FIELDS + ["ir_path", "mask_path"]
+                "vulva_visible", "vulva_prob", "vulva_conf", "mask_area_px"] + MEASURE_FIELDS + \
+               ["blob_status", "ir_path", "mask_path"]
 
 
 def write_csv(rows, path, fields=None):
@@ -116,6 +118,7 @@ def main():
     model, ckpt = load_checkpoint(args.model, device)
     thr, min_area = ckpt.get("threshold", 0.5), ckpt.get("min_area", 25)
     presence = ckpt.get("presence_threshold", 0.0)   # models before r5 have none
+    rule = rule_from_checkpoint(ckpt)                # keep_rule.py; the plain cut when none is tuned
     inputs = ckpt.get("inputs", "ir")
     K = load_intrinsics(args.calibration)
 
@@ -140,7 +143,9 @@ def main():
         chunk = cands[i:i + 64]
         grays = [read_input(c["ir_path"], c["depth_path"], inputs) for c in chunk]
         ok = [j for j, g in enumerate(grays) if g is not None]
-        res = predict(model, [grays[j] for j in ok], device, thr, min_area, args.batch_size, presence)
+        # every blob is measured; keep_rule decides which count, so a later rule can be re-applied
+        # to vulva_frames.csv (keep_rule.py --apply) without running the model again
+        res = predict(model, [grays[j] for j in ok], device, thr, min_area, args.batch_size)
         res_by = dict(zip(ok, res))
         for j, c in enumerate(chunk):
             row = {k: c[k] for k in ("timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence", "ir_path")}
@@ -149,11 +154,15 @@ def main():
                 rows.append(row)
                 continue
             mask, prob, area, conf = res_by[j]
-            row.update({"vulva_visible": int(mask.any()), "vulva_prob": round(prob, 4),
+            m = measure(load_depth_raw(c["depth_path"]), mask, K) if mask.any() else None
+            measured = m is not None and m["measure_status"] == "ok"
+            kept = m is not None and keep_blob(conf, m["peak_height_mm"] if measured else None, measured, rule)
+            row.update({"vulva_visible": int(kept), "vulva_prob": round(prob, 4),
                         "vulva_conf": round(conf, 4), "mask_area_px": area})
-            if mask.any():
-                m = measure(load_depth_raw(c["depth_path"]), mask, K)
+            if m is not None:
                 row.update(m)
+                row["blob_status"] = m["measure_status"]
+            if kept:
                 if args.save_masks:
                     p = os.path.join(mask_dir, f"{c['timestamp_folder']}_pig{c['pig_id']}_{c['pig_timestamp']}.png")
                     cv2.imwrite(p, mask * 255)
@@ -163,8 +172,10 @@ def main():
                     colour = None if args.ir_sheet else colour_on_ir_grid(c["ir_path"], gray, mask)
                     tiles.append(overlay_tile(gray, mask, f"p{c['pig_id']} {c['pig_timestamp'][4:13]} "
                                               f"W{m['width_mm']:.0f} L{m['length_mm']:.0f}", colour=colour))
+            elif m is not None:
+                row["measure_status"] = "low_confidence"   # drawn but dropped; its numbers stay for re-tuning
             else:
-                row["measure_status"] = "low_confidence" if 0 < conf < presence else "not_visible"
+                row["measure_status"] = "not_visible"
             rows.append(row)
         print(f"  {min(i + 64, len(cands))}/{len(cands)} frames", flush=True)
 
@@ -183,7 +194,7 @@ def main():
     good = sum(1 for r in rows if r.get("measure_status") == "ok")
     unsure = sum(1 for r in rows if r.get("measure_status") == "low_confidence")
     summary = {"frames": len(rows), "visible": visible, "low_confidence": unsure, "measured_ok": good,
-               "sow_days": len(daily), "model": args.model, "presence_threshold": presence,
+               "sow_days": len(daily), "model": args.model, "presence_threshold": presence, "keep_rule": rule,
                "seconds": round(time.time() - t0, 1)}
     print(f"Vulva visible in {visible} of {len(rows)} standing frames ({unsure} more dropped as low confidence); "
           f"measured {good}; {len(daily)} sow-days with at least {args.min_frames} good frames")
