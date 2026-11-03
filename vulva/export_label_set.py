@@ -17,6 +17,8 @@ Usage (lab PC, copying to the Mac through the Remote Desktop share):
     python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set ^
         --windows 06:00-11:00,14:00-18:00 --per-day 3
     python vulva/export_label_set.py outputs\gt_feb06\predictions.csv \\tsclient\paal_exchange\vulva_label_set --add-rgb
+    # frames picked by pick_hard_frames.py (already one row per frame): --per-day 0 keeps them all
+    python vulva/export_label_set.py outputs\r9_pick.csv C:\Users\aakdbx\vulva_r9_set --per-day 0 --windows 00:00-23:59 --rgb
     # test set for eval_seg.py: new days, 2 per sow-day spread over the whole day, labelled without --model
     python vulva/export_label_set.py outputs\gt_feb12\predictions.csv \\tsclient\paal_exchange\vulva_test_feb12 ^
         --dates 20260212,20260213,20260214,20260215 --per-day 2 --windows 00:00-23:59 --rgb
@@ -31,7 +33,7 @@ import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from select_frames import parse_windows, select  # noqa: E402
+from select_frames import parse_windows, relocate, select  # noqa: E402
 
 FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "ir_path", "depth_path", "posture_confidence"]
 RGB_FIELDS = ["rgb_aligned_path", "rgb_path"]
@@ -62,10 +64,12 @@ def _copy_rgb(ir_src, out_dir, folder):
     return rel
 
 
-def export(pred_rows, out_dir, windows=None, per_day=3, min_conf=0.6, dates=None, rgb=False):
+def export(pred_rows, out_dir, windows=None, per_day=3, min_conf=0.6, dates=None, rgb=False, data_roots=None):
     picked = select(pred_rows, min_conf, windows, per_day)
     if dates:
         picked = [p for p in picked if p["pig_timestamp"][:8] in dates]
+    if data_roots:                     # predictions made before the data moved: look frames up by folder name
+        picked, _ = relocate(picked, data_roots)
     os.makedirs(out_dir, exist_ok=True)
     rows, missing = [], 0
     for p in picked:
@@ -137,6 +141,9 @@ def main():
     ap.add_argument("--min-conf", type=float, default=0.6)
     ap.add_argument("--dates", default="", help="comma list of YYYYMMDD to keep (default: all)")
     ap.add_argument("--rgb", action="store_true", help="also copy the colour images (rgb_aligned and rgb)")
+    ap.add_argument("--data-roots", default="",
+                    help="';'-separated folders holding the timestamp folders, for predictions made before the data "
+                         "moved")
     ap.add_argument("--add-rgb", action="store_true",
                     help="only add colour images to the existing set in OUT (frames and labels unchanged)")
     args = ap.parse_args()
@@ -150,7 +157,7 @@ def main():
         return
     dates = {d.strip() for d in args.dates.split(",") if d.strip()} or None
     rows, missing = export(preds, args.out_dir, parse_windows(args.windows), args.per_day, args.min_conf, dates,
-                           args.rgb)
+                           args.rgb, [r for r in args.data_roots.split(";") if r.strip()])
     sows = {r["pig_id"] for r in rows}
     days = {r["pig_timestamp"][:8] for r in rows}
     print(f"Copied {len(rows)} frames ({len(sows)} sows, {len(days)} days) to {args.out_dir}; "

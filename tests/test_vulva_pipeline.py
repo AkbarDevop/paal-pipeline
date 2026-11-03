@@ -10,6 +10,7 @@ whole train -> run path on a tiny dataset.
 """
 
 import csv
+from collections import Counter
 import os
 import shutil
 import subprocess
@@ -815,6 +816,53 @@ def test_size_vs_caliper_ratios_and_within_sow_tracking():
         _, sm = compare(model, truth)
         assert sh["sow_days"] == 36 and abs(sh["width_mm"]["ratio"] - 1.15) < 0.02, sh
         assert abs(sm["length_mm"]["ratio"] - 1.0) < 0.02 and sm["length_mm"]["within_r"] > 0.9, sm
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_pick_hard_frames_buckets_holdouts_and_export():
+    """pick_hard_frames.py: unsure / borderline / nothing / sure frames, spread over sows and days, never
+    from held-out test days or test sows or already-labelled frames; export_label_set.py copies them."""
+    import random as _random
+    from export_label_set import export
+    from pick_hard_frames import parse_holdout, parse_ranges, pick
+    tmp = tempfile.mkdtemp()
+    try:
+        rows = []
+        for day in ("20260124", "20260125", "20260213", "20260302"):
+            for pig in range(6):
+                for k in range(6):
+                    ts = f"{day}-09-{10 + k:02d}-{pig:02d}"
+                    folder = os.path.join(tmp, "raw", f"{day}-09-00-00")
+                    os.makedirs(folder, exist_ok=True)
+                    ir = os.path.join(folder, f"pig{pig}_ir_vis_{ts}.jpg")
+                    cv2.imwrite(ir, np.zeros((8, 8), np.uint8))
+                    status, vis, conf = [("low_confidence", 0, 0.95), ("not_visible", 0, 0.0), ("ok", 1, 0.990),
+                                         ("ok", 1, 0.9995), ("ok", 1, 0.997), ("low_confidence", 0, 0.9)][k]
+                    rows.append({"timestamp_folder": f"{day}-09-00-00", "pig_id": str(pig), "pig_timestamp": ts,
+                                 "posture_confidence": "0.9", "measure_status": status, "vulva_visible": str(vis),
+                                 "vulva_conf": str(conf), "ir_path": ir})
+        done = rows[0]
+        lab = os.path.join(tmp, "labels.csv")
+        with open(lab, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["pig_id", "pig_timestamp"])
+            w.writeheader()
+            w.writerow({"pig_id": done["pig_id"], "pig_timestamp": done["pig_timestamp"]})
+        from pick_hard_frames import labelled_keys
+        picked, pools = pick(rows, 0.9888, {"unsure": 10, "borderline": 4, "nothing": 4, "sure": 2},
+                             _random.Random(0), parse_ranges("20260213-20260213,20260302"),
+                             parse_holdout("0,1@20260123-20260205"), labelled_keys([lab]))
+        days = {r["pig_timestamp"][:8] for r in picked}
+        assert days <= {"20260124", "20260125"}, days                      # test days never picked
+        assert not any(r["pig_id"] in ("0", "1") for r in picked)          # January test sows never picked
+        assert pools == {"unsure": 16, "borderline": 8, "nothing": 8, "sure": 8}, pools
+        got = Counter(r["bucket"] for r in picked)
+        assert got == {"unsure": 10, "borderline": 4, "nothing": 4, "sure": 2}, got
+        assert len({(r["pig_id"], r["pig_timestamp"][:8]) for r in picked if r["bucket"] == "unsure"}) == 8
+        preds = [dict(r, prediction_name="standing", confidence="0.9", image_path=r["ir_path"]) for r in picked]
+        out_rows, missing = export(preds, os.path.join(tmp, "set"), None, 0, 0.6, None, False)
+        assert len(out_rows) == 20 and missing == 0
+        assert os.path.exists(os.path.join(tmp, "set", "label_set.csv"))
     finally:
         shutil.rmtree(tmp)
 
