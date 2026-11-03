@@ -104,12 +104,15 @@ def score(frames, rule, min_iou=0.2):
             "precision": prec, "recall": rec, "specificity": spec}
 
 
-def grid():
-    highs = [round(x, 3) for x in np.concatenate([np.arange(0.5, 0.95, 0.05), np.arange(0.95, 1.0, 0.005)])]
+def grid(extra_highs=()):
+    highs = sorted({round(float(x), 4) for x in np.concatenate([np.arange(0.5, 0.95, 0.05), np.arange(0.95, 1.0, 0.001)])}
+                   | {round(float(x), 4) for x in extra_highs})
     lows = [round(x, 3) for x in np.arange(0.3, 1.0, 0.05)]
     peaks = [round(x, 1) for x in np.arange(0.0, 20.5, 0.5)]
     for hi in highs:
         yield {"conf_high": hi, "conf_low": hi, "min_peak_mm": 0.0}           # confidence only
+        if hi < 0.95:
+            continue                          # the bump branch only below a high cut
         for lo in lows:
             if lo >= hi:
                 break
@@ -117,11 +120,13 @@ def grid():
                 yield {"conf_high": hi, "conf_low": lo, "min_peak_mm": pk}
 
 
-def tune(tests, precision=0.95, min_iou=0.2):
+def tune(tests, precision=0.95, min_iou=0.2, baseline=None):
     """tests: list of frame lists. Highest pooled recall with precision >= target on every test;
-    ties go to the higher worst-test precision, then to the stricter rule."""
+    ties go to the higher worst-test precision, then to the stricter rule. The baseline (the
+    checkpoint's own cut) is always a candidate, so the result is never worse than doing nothing."""
     best, best_key = None, None
-    for rule in grid():
+    extra = [baseline["conf_high"]] if baseline else []
+    for rule in ([dict(baseline)] if baseline else []) + list(grid(extra)):
         scores = [score(t, rule, min_iou) for t in tests]
         precs = [s["precision"] for s in scores]
         if any(not (p >= precision) for p in precs if p == p) or all(p != p for p in precs):
@@ -156,8 +161,9 @@ def report(names, tests, rule, old, precision, min_iou):
     if len(tests) == 2:
         lines.append("Carry-over check (tune on one test, score the other):")
         for i, j in ((0, 1), (1, 0)):
-            r = tune([tests[i]], precision, min_iou)
+            r = tune([tests[i]], precision, min_iou, old)
             if r:
+                r = {k: float(v) for k, v in r.items()}
                 lines.append(f"  tuned on {names[i]} -> {r}; on {names[j]}: {fmt(score(tests[j], r, min_iou))}")
     # how well the two numbers separate real vulvas from the rest, among blobs the model drew
     for n, t in zip(names, tests):
@@ -218,7 +224,7 @@ def main():
         [os.path.basename(os.path.dirname(os.path.abspath(p))) or p for p in args.evals]
     tests = [frames_from_eval(p) for p in args.evals]
     old = rule_from_checkpoint({k: v for k, v in ckpt.items() if k != "keep_rule"})
-    rule = tune(tests, args.precision, args.min_iou)
+    rule = tune(tests, args.precision, args.min_iou, old)
     if rule is None:
         sys.exit(f"No rule reaches precision {args.precision} on every test; try a lower --precision")
     lines = report(names, tests, rule, old, args.precision, args.min_iou)

@@ -107,7 +107,7 @@ def evaluate(model, ckpt, rows, device, K=None):
                     "pig_timestamp": r.get("pig_timestamp", ""), "label": r["label"], "note": r.get("note", ""),
                     "how": r.get("how", ""),
                     "verdict": verdict, "model_visible": int(visible), "model_visible_before_cut": int(before),
-                    "blob_conf": round(conf, 4), "iou": iou,
+                    "blob_conf": round(conf, 6), "iou": iou,
                     "human_width_mm": hm.get("width_mm", ""), "model_width_mm": mm.get("width_mm", ""),
                     "human_length_mm": hm.get("length_mm", ""), "model_length_mm": mm.get("length_mm", ""),
                     "human_peak_height_mm": hm.get("peak_height_mm", ""),
