@@ -26,6 +26,7 @@ python vulva/review_run.py <run>/vulva_frames.csv --model <ckpt> --n 24 --ply 5 
 python vulva/split_by_sow.py <labels.csv>                           # test / train halves by stall
 python vulva/keep_rule.py <eval A>/eval_frames.csv <eval B>/eval_frames.csv --model <ckpt> --write <ckpt with rule>  # keep/drop: confidence + bump
 python vulva/size_vs_caliper.py outputs/vulva/sow_day_truth.csv <eval>/eval_frames.csv <run>/vulva_frames.csv   # which outline size is right
+python vulva/review_run.py <run>/vulva_frames.csv --model <ckpt> --which not_visible --n 192 --sheet-only   # 48 frames per page, fast check by eye
 python vulva/pick_hard_frames.py <run>/vulva_frames.csv --model <ckpt> --hold-out-dates <test days> --out outputs/r9_pick.csv   # frames to label next
 python tests/test_vulva_pipeline.py                                  # 24 synthetic checks
 ```

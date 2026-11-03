@@ -9,6 +9,10 @@ again on just those frames and writes, under --out-dir:
       with the model's outline (yellow; orange if the confidence check dropped it) and the
       frame's numbers underneath: width, length, protrusion, volume, confidence, distance
   index.jpg                      all panels of this review, smaller, one under another
+  sheet_01.jpg, sheet_02.jpg ... contact sheets for fast checking: 48 frames per page (8 x 6),
+                                 colour image only, the model's outline on it, pig / date / time /
+                                 confidence on each tile. --sheet-only writes just these (fast,
+                                 so --n can be in the hundreds)
   ply/<pig>_<timestamp>.ply      (--ply N) the frame's 3D points around the vulva as a point
                                  cloud: vulva red, skin grey. Open in MeshLab or CloudCompare,
                                  or: python vulva/view_pointcloud.py <file>.ply
@@ -21,6 +25,7 @@ Usage:
     python vulva/review_run.py outputs\vulva_r7_day1\vulva_frames.csv --model models\vulva_seg_r7.pth
     python vulva/review_run.py outputs\vulva_r7_day1\vulva_frames.csv --model models\vulva_seg_r7.pth --which low_confidence --n 30
     python vulva/review_run.py outputs\vulva_r7_day1\vulva_frames.csv --model models\vulva_seg_r7.pth --n 10 --ply 5
+    python vulva/review_run.py outputs\vulva_r8_long\vulva_frames.csv --model models\vulva_seg_r8_ir.pth --which not_visible --n 192 --sheet-only
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from select_frames import depth_path_for  # noqa: E402
 
 P = 300            # panel size, px
 HALF = 80          # half-width of the view around the vulva, IR px
+WIDE = 200         # half-width when the model drew nothing: show most of the sow's rear so a missed vulva is visible
 
 
 def colour_for(ir_path, gray, centre):
@@ -66,15 +72,42 @@ def crop(img, cx, cy, half=HALF):
     return img[y1:y1 + 2 * half, x1:x1 + 2 * half], (x1, y1)
 
 
-def outlined(img, mask, x1y1, colour):
+def outlined(img, mask, x1y1, colour, half=HALF):
     x1, y1 = x1y1
     t = cv2.resize(img, (P, P), interpolation=cv2.INTER_CUBIC)
     if mask is not None and mask.any():
-        sc = P / (2 * HALF)
+        sc = P / (2 * half)
         cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         cnts = [np.round((c - [x1, y1]) * sc).astype(np.int32) for c in cnts]
         cv2.drawContours(t, cnts, -1, colour, 2)
     return t
+
+
+T = 230            # contact-sheet tile size, px
+COLS, ROWS = 8, 6  # tiles per contact-sheet page
+
+
+def sheet_tile(img, top, bottom):
+    t = cv2.resize(img, (T, T), interpolation=cv2.INTER_AREA)
+    for y, text in ((16, top), (T - 7, bottom)):
+        cv2.putText(t, text, (5, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(t, text, (5, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.rectangle(t, (0, 0), (T - 1, T - 1), (30, 30, 30), 1)
+    return t
+
+
+def save_sheets(tiles, out):
+    """Pages of COLS x ROWS tiles: sheet_01.jpg, sheet_02.jpg, ... Returns the number of pages."""
+    per = COLS * ROWS
+    blank = np.full((T, T, 3), 25, np.uint8)
+    pages = 0
+    for i in range(0, len(tiles), per):
+        page = tiles[i:i + per]
+        page += [blank] * ((-len(page)) % COLS)
+        rows = [np.hstack(page[j:j + COLS]) for j in range(0, len(page), COLS)]
+        pages += 1
+        cv2.imwrite(os.path.join(out, f"sheet_{pages:02d}.jpg"), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return pages
 
 
 def label(img, text):
@@ -159,6 +192,8 @@ def main():
     ap.add_argument("--ply", type=int, default=0, help="also write 3D point clouds for this many frames")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-dir", default="", help="default: <run folder>/review_<which>")
+    ap.add_argument("--sheet-only", action="store_true",
+                    help="only the contact sheets (48 frames per page, colour image), no panels or 3D: fast")
     args = ap.parse_args()
 
     with open(args.frames_csv, newline="", encoding="utf-8-sig") as f:
@@ -168,15 +203,18 @@ def main():
         sys.exit(f"No frames with measure_status {args.which!r} in {args.frames_csv}")
     rows = sorted(random.Random(args.seed).sample(rows, min(args.n, len(rows))), key=lambda r: r["pig_timestamp"])
     out = args.out_dir or os.path.join(os.path.dirname(os.path.abspath(args.frames_csv)), f"review_{args.which}")
-    os.makedirs(os.path.join(out, "panels"), exist_ok=True)
-    if args.ply:
+    if not args.sheet_only:
+        os.makedirs(os.path.join(out, "panels"), exist_ok=True)
+    else:
+        os.makedirs(out, exist_ok=True)
+    if args.ply and not args.sheet_only:
         os.makedirs(os.path.join(out, "ply"), exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model, ck = load_checkpoint(args.model, device)
     thr, min_area, cut = ck.get("threshold", 0.5), ck.get("min_area", 25), ck.get("presence_threshold", 0.0)
     inputs = ck.get("inputs", "ir")
-    smalls, n_ply = [], 0
+    smalls, sheet, n_ply = [], [], 0
     for r in rows:
         ir_path = r["ir_path"]
         dpath = depth_path_for(ir_path)
@@ -191,29 +229,37 @@ def main():
             cx, cy = int(xs.mean()), int(ys.mean())
         else:
             cx, cy = 310, 255
+        half = HALF if has else WIDE
         col = (0, 215, 255) if has and conf >= cut else (0, 140, 255)
         depth = load_depth_raw(dpath)
         rgb = colour_for(ir_path, gray, (cx, cy) if has else None)
         tiles = []
-        if rgb is not None:
-            c, o = crop(rgb, cx, cy)
-            tiles.append(label(outlined(c, mask, o, col), "colour (matched to IR)"))
-        else:
-            tiles.append(label(np.full((P, P, 3), 40, np.uint8), "no colour image"))
         # local contrast boost for display only (as in the labelling tool); a global histogram
         # equalisation washes the sow out to white, because the dark stall dominates the frame
         disp = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
-        c, o = crop(cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR), cx, cy)
-        tiles.append(label(outlined(c, mask, o, col), "IR (contrast-boosted)"))
+        ts = r["pig_timestamp"]
+        src = rgb if rgb is not None else cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
+        c, o = crop(src, cx, cy, half)
+        sheet.append(sheet_tile(outlined(c, mask, o, col, half),
+                                f"p{r['pig_id']} {ts[4:6]}/{ts[6:8]} {ts[9:11]}:{ts[12:14]}",
+                                f"conf {conf:.3f}" if has else "nothing drawn"))
+        if args.sheet_only:
+            continue
+        if rgb is not None:
+            c, o = crop(rgb, cx, cy, half)
+            tiles.append(label(outlined(c, mask, o, col, half), "colour (matched to IR)"))
+        else:
+            tiles.append(label(np.full((P, P, 3), 40, np.uint8), "no colour image"))
+        c, o = crop(cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR), cx, cy, half)
+        tiles.append(label(outlined(c, mask, o, col, half), "IR (contrast-boosted)"))
         v = views_for(dpath)
         if v is not None:
-            c, o = crop(cv2.cvtColor(v[1], cv2.COLOR_RGB2BGR), cx, cy)
-            tiles.append(label(outlined(c, mask, o, (255, 255, 255)), "height above skin, +/-8 mm"))
+            c, o = crop(cv2.cvtColor(v[1], cv2.COLOR_RGB2BGR), cx, cy, half)
+            tiles.append(label(outlined(c, mask, o, (255, 255, 255), half), "height above skin, +/-8 mm"))
         else:
             tiles.append(label(np.full((P, P, 3), 40, np.uint8), "no depth"))
         surf = local_surface(depth, mask, cx, cy)
         tiles.append(surface_panel(surf))
-        ts = r["pig_timestamp"]
         bar = np.full((44, P * 4, 3), 245, np.uint8)
         line1 = (f"pig {r['pig_id']}  {ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[12:14]}   "
                  f"{r.get('measure_status', '')}   conf {conf:.3f} (cut {cut:.3f})")
@@ -231,8 +277,13 @@ def main():
             n_ply += 1
     if smalls:
         cv2.imwrite(os.path.join(out, "index.jpg"), np.vstack(smalls), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    pages = save_sheets(sheet, out)
+    if args.sheet_only:
+        print(f"{len(sheet)} frames ({args.which}) on {pages} contact sheet(s): {os.path.join(out, 'sheet_01.jpg')} ...")
+        return
     print(f"{len(smalls)} frames ({args.which}): panels in {os.path.join(out, 'panels')}, overview "
-          f"{os.path.join(out, 'index.jpg')}" + (f", {n_ply} point clouds in {os.path.join(out, 'ply')}" if n_ply else ""))
+          f"{os.path.join(out, 'index.jpg')}, contact sheets {os.path.join(out, 'sheet_01.jpg')} ..."
+          + (f", {n_ply} point clouds in {os.path.join(out, 'ply')}" if n_ply else ""))
 
 
 if __name__ == "__main__":

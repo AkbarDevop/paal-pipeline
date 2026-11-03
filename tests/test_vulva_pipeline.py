@@ -209,6 +209,17 @@ def test_review_run_panels_and_point_cloud():
         assert out.returncode == 0, out.stderr[-2000:]
         assert len(os.listdir(os.path.join(tmp, "review_ok", "panels"))) == 2
         assert cv2.imread(os.path.join(tmp, "review_ok", "index.jpg")).shape[1] == 600
+        assert os.path.exists(os.path.join(tmp, "review_ok", "sheet_01.jpg"))
+        rows2 = [dict(r, measure_status="not_visible") for r in rows]            # fast contact sheets only
+        with open(fcsv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows2[0]))
+            w.writeheader()
+            w.writerows(rows2)
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "review_run.py"), fcsv, "--model", ck, "--which",
+                              "not_visible", "--n", "2", "--sheet-only"], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        sh = cv2.imread(os.path.join(tmp, "review_not_visible", "sheet_01.jpg"))
+        assert sh.shape[:2] == (230, 230 * 8) and not os.path.exists(os.path.join(tmp, "review_not_visible", "panels"))
     finally:
         shutil.rmtree(tmp)
 
