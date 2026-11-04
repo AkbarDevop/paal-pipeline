@@ -1,7 +1,8 @@
 """Vulva segmentation model and the image handling shared by training and inference.
 
 Model: U-Net with a ResNet-18 encoder (ImageNet weights), one output channel
-(vulva vs not). Xu et al. (2024) also used a U-Net for this step. The decoder
+(vulva vs not), or three (background / vulva / tail; checkpoint "classes": 3) so the model
+learns what a tail looks like instead of only "vulva vs everything else". Xu et al. (2024) also used a U-Net for this step. The decoder
 keeps skip connections down to half resolution, because on the OAK-D IR image
 the vulva is only about 15 x 25 pixels.
 
@@ -149,10 +150,12 @@ class _Up(nn.Module):
 
 
 class VulvaUNet(nn.Module):
-    """ResNet-18 encoder + 4-stage decoder -> 1 logit per pixel at input resolution."""
+    """ResNet-18 encoder + 4-stage decoder -> logits per pixel at input resolution:
+    1 channel (vulva vs not) or, with n_out=3, background / vulva / tail."""
 
-    def __init__(self, pretrained=True):
+    def __init__(self, pretrained=True, n_out=1):
         super().__init__()
+        self.n_out = n_out
         from torchvision.models import ResNet18_Weights, resnet18
         enc = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
         self.stem = nn.Sequential(enc.conv1, enc.bn1, enc.relu)      # 64, /2
@@ -162,7 +165,7 @@ class VulvaUNet(nn.Module):
         self.u3 = _Up(256, 128, 128)
         self.u2 = _Up(128, 64, 64)
         self.u1 = _Up(64, 64, 32)
-        self.head = nn.Conv2d(32, 1, 1)
+        self.head = nn.Conv2d(32, n_out, 1)
 
     def forward(self, x):
         size = x.shape[-2:]
@@ -184,9 +187,13 @@ def save_checkpoint(model, path, meta):
                 "input": [SEG_W, SEG_H], "crop": list(CROP_TOF), **meta}, path)
 
 
+def n_out_for(ckpt):
+    return 3 if int(ckpt.get("classes", 2)) == 3 else 1
+
+
 def load_checkpoint(path, device="cpu"):
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    model = VulvaUNet(pretrained=False)
+    model = VulvaUNet(pretrained=False, n_out=n_out_for(ckpt))
     model.load_state_dict(ckpt["state_dict"])
     model.to(device).eval()
     return model, ckpt
@@ -198,27 +205,67 @@ def blob_confidence(prob, mask):
     return float(prob[mask > 0].astype(np.float32).mean()) if mask.any() else 0.0
 
 
+MIN_TAIL_AREA = 40      # model pixels; smaller tail specks are ignored
+TAIL_GAP = 3            # model pixels: a tail this close to the vulva blob counts as touching it
+
+
+def parts_from_probs(p, threshold=0.5, min_area=None):
+    """One frame's model output -> (vulva mask, vulva prob map, tail mask or None, blob area before
+    the minimum-area check), model space.
+    p: H x W vulva probability (1-channel models) or 3 x H x W softmax (bg, vulva, tail)."""
+    if p.ndim == 3:
+        lab = p.argmax(0)
+        vul, pv = (lab == 1).astype(np.uint8), p[1]
+        tail = (lab == 2).astype(np.uint8)
+        n, cc, st, _ = cv2.connectedComponentsWithStats(tail, connectivity=8)
+        keep = [k for k in range(1, n) if st[k, cv2.CC_STAT_AREA] >= MIN_TAIL_AREA]
+        tail = np.isin(cc, keep).astype(np.uint8) if keep else np.zeros_like(tail)
+    else:
+        vul, pv, tail = (p >= threshold).astype(np.uint8), p, None
+    vul = largest_component(vul)
+    area = int(vul.sum())
+    if min_area is not None and area < min_area:
+        vul[:] = 0
+    return vul, pv, tail, area
+
+
+def touches(vulva, tail, gap=TAIL_GAP):
+    if tail is None or not vulva.any() or not tail.any():
+        return False
+    k = np.ones((2 * gap + 1, 2 * gap + 1), np.uint8)
+    return bool((cv2.dilate(vulva, k) & tail).any())
+
+
 @torch.no_grad()
-def predict(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size=16, presence=0.0):
-    """Full-frame inputs (read_input / make_input; plain grey for "ir" models)
-    -> list of (full-frame mask uint8, max prob, area in model pixels, blob confidence).
-    presence: blobs with a confidence below this are dropped (checkpoint "presence_threshold")."""
+def predict_parts(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size=16, presence=0.0):
+    """Full-frame inputs -> one dict per frame: vulva (full-frame mask, emptied below the
+    confidence cut), tail (full-frame mask, 3-class models only, else None), touches_tail
+    (the vulva blob touches a tail: partly covered, so its size is not trusted), pmax, area,
+    conf (mean vulva probability in the blob)."""
     out = []
+    n_out = getattr(model, "n_out", 1)
     for i in range(0, len(grays), batch_size):
         chunk = grays[i:i + batch_size]
         x = torch.stack([to_tensor(to_model_space(g)[0]) for g in chunk]).to(device)
-        probs = torch.sigmoid(model(x))[:, 0].cpu().numpy()
+        logits = model(x)
+        probs = (torch.softmax(logits, 1) if n_out == 3 else torch.sigmoid(logits)[:, 0]).cpu().numpy()
         for p in probs:
-            m = (p >= threshold).astype(np.uint8)
-            m = largest_component(m)
-            area = int(m.sum())
-            if min_area is not None and area < min_area:
-                m[:] = 0
-            conf = blob_confidence(p, m)
+            vul, pv, tail, area = parts_from_probs(p, threshold, min_area)
+            conf = blob_confidence(pv, vul)
             if conf < presence:
-                m[:] = 0
-            out.append((to_full_frame(m), float(p.max()), area, conf))
+                vul[:] = 0
+            out.append({"vulva": to_full_frame(vul), "tail": to_full_frame(tail) if tail is not None else None,
+                        "touches_tail": touches(vul, tail), "pmax": float(pv.max()), "area": area, "conf": conf})
     return out
+
+
+def predict(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size=16, presence=0.0):
+    """Full-frame inputs (read_input / make_input; plain grey for "ir" models)
+    -> list of (full-frame mask uint8, max prob, area in model pixels, blob confidence).
+    presence: blobs with a confidence below this are dropped (checkpoint "presence_threshold").
+    3-class models: the vulva class; use predict_parts for the tail."""
+    return [(d["vulva"], d["pmax"], d["area"], d["conf"])
+            for d in predict_parts(model, grays, device, threshold, min_area, batch_size, presence)]
 
 
 def largest_component(m):

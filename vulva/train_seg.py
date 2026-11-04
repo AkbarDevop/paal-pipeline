@@ -12,10 +12,18 @@ r"""Train the vulva segmentation U-Net, with cross-validation grouped by sow.
    frames cost little (each sow has many standing frames a day).
 2. A final model trained on all labelled frames -> models/vulva_seg.pth.
 
+--classes 3 trains background / vulva / tail (tail outlines from label_tail.py, read from
+tail_labels.csv next to each labels CSV). Frames whose tail was never outlined still teach
+vulva versus not-vulva: for them tail and background are one class in the loss, so a set can
+be tail-labelled in part. The vulva is the pixels where vulva wins (no threshold to tune), and
+a vulva that touches a tail is reported separately (partly covered). No confidence cut by
+default for 3 classes (--presence-precision 0); the CV report shows what one would do.
+
 Usage:
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv --folds 5 --epochs 60
     python vulva/train_seg.py --labels <label set>/labels.csv --inputs ir+depth   # IR + height + shading
+    python vulva/train_seg.py --labels <set A>/labels.csv <set B>/labels.csv --classes 3 --jobs 3   # + tail class
     # lab PC: --jobs 6 trains the 5 folds and the final model at the same time (split over the GPUs);
     # --copy-to also puts the model, report and per-frame CV file on the Mac share when done
     python vulva\train_seg.py --jobs 6 --labels \\tsclient\paal_exchange\vulva_label_set\labels_r4.csv --out-model models\vulva_seg_r5.pth --out-dir outputs\vulva_seg_r5 --copy-to \\tsclient\paal_exchange\vulva_label_set
@@ -42,8 +50,8 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, blob_confidence, largest_component,  # noqa: E402
-                       read_input, read_mask, save_checkpoint, to_model_space, to_tensor)
+from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, blob_confidence, parts_from_probs,  # noqa: E402
+                       read_input, read_mask, save_checkpoint, to_model_space, to_tensor, touches)
 from select_frames import index_folders  # noqa: E402
 
 MIN_AREA = 25    # model pixels; smaller blobs count as "no vulva"
@@ -65,12 +73,28 @@ def relocate_row(r, index):
     return True
 
 
-def load_labels(paths, inputs="ir", frames_roots=None):
+def tail_labels_for(labels_csv):
+    """tail_labels.csv next to a labels CSV (label_tail.py) -> {ir_path as written there: (tail 0/1, mask path)}."""
+    p = os.path.join(os.path.dirname(os.path.abspath(labels_csv)), "tail_labels.csv")
+    if not os.path.exists(p):
+        return {}
+    base = os.path.dirname(p)
+    out = {}
+    with open(p, newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            mp = r.get("tail_mask_path", "")
+            out[r["ir_path"]] = (str(r.get("tail")) == "1", os.path.join(base, mp) if mp else "")
+    return out
+
+
+def load_labels(paths, inputs="ir", frames_roots=None, classes=2):
     """Label CSV(s) from make_seg_labels.py or label_ellipse.py. Relative paths are
     resolved against each CSV's folder, so a label set can move between computers; with
     frames_roots, frames not found there are looked up by timestamp folder, so labels.csv +
     masks/ are enough and the images come from the raw share. With inputs="ir+depth" the
-    depth file is taken from a depth_path column or, without one, from the IR file name."""
+    depth file is taken from a depth_path column or, without one, from the IR file name.
+    classes=3: masks are 0 background, 1 vulva, 2 tail (tail drawn over the vulva where they
+    overlap) and items carry tail_known (the frame's tail was looked at in label_tail.py)."""
     paths = [paths] if isinstance(paths, str) else list(paths)
     index = index_folders(frames_roots) if frames_roots else {}
     items, unreadable, moved = [], [], 0
@@ -83,7 +107,9 @@ def load_labels(paths, inputs="ir", frames_roots=None):
 
         with open(path, newline="", encoding="utf-8-sig") as f:
             rows = [r for r in csv.DictReader(f) if r["label"] in ("present", "absent")]
+        tails = tail_labels_for(path) if classes == 3 else {}
         for r in rows:
+            tail = tails.get(r["ir_path"])
             r["ir_path"], r["mask_path"] = res(r["ir_path"]), res(r.get("mask_path", ""))
             r["depth_path"] = res(r.get("depth_path", ""))
             moved += relocate_row(r, index)
@@ -102,12 +128,24 @@ def load_labels(paths, inputs="ir", frames_roots=None):
                     continue
             else:
                 m = np.zeros(img.shape[:2], np.uint8)
+            known = tail is not None
+            if known and tail[0]:
+                tm = read_mask(tail[1])
+                if tm is None:
+                    known = False
+                else:
+                    m = np.where(tm > 0, 2, m).astype(np.uint8)
             g, mk = to_model_space(img, m)
-            items.append({"image": g, "mask": mk, "pig_id": int(float(r["pig_id"])), "row": r})
+            items.append({"image": g, "mask": mk, "pig_id": int(float(r["pig_id"])), "row": r,
+                          "tail_known": known})
         if len(paths) > 1:
             print(f"  {path}: {len(items) - before} frames", flush=True)
     if moved:
         print(f"  {moved} frames read from --frames-root (not next to their labels)", flush=True)
+    if classes == 3:
+        known = [it for it in items if it["tail_known"]]
+        print(f"  tails: looked at in {len(known)} frames, outlined in "
+              f"{sum(1 for it in known if (it['mask'] == 2).any())}", flush=True)
     if unreadable:
         print(f"WARNING: {len(unreadable)} labelled frames could not be read and are left out, "
               f"e.g. {unreadable[0]}", flush=True)
@@ -116,14 +154,20 @@ def load_labels(paths, inputs="ir", frames_roots=None):
 def save_items(items, path):
     """Loaded frames -> one .npz, so --jobs workers train on exactly these without re-reading the share."""
     np.savez(path, images=np.stack([it["image"] for it in items]), masks=np.stack([it["mask"] for it in items]),
-             pigs=np.array([it["pig_id"] for it in items]), keys=np.array([it["row"]["ir_path"] for it in items]))
+             pigs=np.array([it["pig_id"] for it in items]), keys=np.array([it["row"]["ir_path"] for it in items]),
+             tail_known=np.array([bool(it.get("tail_known", False)) for it in items]))
 
 
 def load_items(path):
     d = np.load(path)
     images, masks, pigs, keys = d["images"], d["masks"], d["pigs"], d["keys"]
-    return [{"image": images[i], "mask": masks[i], "pig_id": int(pigs[i]), "row": {"ir_path": str(keys[i])}}
-            for i in range(len(keys))]
+    known = d["tail_known"] if "tail_known" in d.files else np.zeros(len(keys), bool)
+    return [{"image": images[i], "mask": masks[i], "pig_id": int(pigs[i]), "row": {"ir_path": str(keys[i])},
+             "tail_known": bool(known[i])} for i in range(len(keys))]
+
+
+def has_vulva(it):
+    return bool((it["mask"] == 1).any())
 
 
 def assign_folds(pigs, k, seed=42):
@@ -157,10 +201,41 @@ class SegData(Dataset):
                 g = np.clip(g.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
             else:                                  # brightness/contrast only on the IR channel
                 g[..., 0] = np.clip(g[..., 0].astype(np.float32) * a + b, 0, 255).astype(np.uint8)
-        return to_tensor(g), torch.from_numpy(m.astype(np.float32))[None]
+        return (to_tensor(g), torch.from_numpy(m.astype(np.float32))[None],
+                torch.tensor(float(self.items[i].get("tail_known", False))))
 
 
-def loss_fn(logits, target, pos_weight=1.0):
+def soft_dice(p, t, has):
+    inter = (p * t).sum((1, 2))
+    d = 1 - (2 * inter + 1) / (p.sum((1, 2)) + t.sum((1, 2)) + 1)
+    return (d * has).sum() / has.sum().clamp(min=1)
+
+
+def loss_fn_3(logits, target, known):
+    """Background / vulva / tail. Frames whose tail was outlined (known): cross-entropy over the
+    three classes. Other frames: vulva versus (background or tail), i.e. the loss on a non-vulva
+    pixel is -log(p_background + p_tail), so an unlabelled tail is never taught as background.
+    Plus soft Dice on the vulva (frames with a vulva) and on the tail (known frames with a tail)."""
+    t = target[:, 0].long()
+    logp = F.log_softmax(logits, 1)
+    nll_known = -logp.gather(1, t[:, None])[:, 0]
+    vul = t == 1
+    not_vul = torch.logsumexp(torch.stack([logp[:, 0], logp[:, 2]], 1), 1)
+    nll_unknown = torch.where(vul, -logp[:, 1], -not_vul)
+    k = known.view(-1, 1, 1) > 0.5
+    nll = torch.where(k, nll_known, nll_unknown).mean()
+    p = logp.exp()
+    vt, tt = vul.float(), (t == 2).float()
+    dice_v = soft_dice(p[:, 1], vt, (vt.sum((1, 2)) > 0).float())
+    dice_t = soft_dice(p[:, 2], tt, ((tt.sum((1, 2)) > 0) & k[:, 0, 0]).float())
+    return nll + dice_v + dice_t
+
+
+def loss_fn(logits, target, pos_weight=1.0, known=None):
+    if logits.shape[1] == 3:
+        return loss_fn_3(logits, target, known if known is not None else torch.zeros(len(target),
+                                                                                      device=logits.device))
+    target = (target == 1).float()
     bce = F.binary_cross_entropy_with_logits(logits, target, pos_weight=torch.tensor(pos_weight, device=logits.device))
     p = torch.sigmoid(logits)
     inter = (p * target).sum((1, 2, 3))
@@ -171,12 +246,13 @@ def loss_fn(logits, target, pos_weight=1.0):
     return bce + dice
 
 
-def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_size=8, log=None, pos_weight=1.0):
-    model = VulvaUNet(pretrained=pretrained).to(device)
-    pos = [it for it in train_items if it["mask"].any()]
-    neg = [it for it in train_items if not it["mask"].any()]
+def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_size=8, log=None, pos_weight=1.0,
+                classes=2):
+    model = VulvaUNet(pretrained=pretrained, n_out=3 if classes == 3 else 1).to(device)
+    pos = [it for it in train_items if has_vulva(it)]
+    neg = [it for it in train_items if not has_vulva(it)]
     # balance: present frames are the minority
-    weights = [1.0 / max(len(pos), 1) if it["mask"].any() else 1.0 / max(len(neg), 1) for it in train_items]
+    weights = [1.0 / max(len(pos), 1) if has_vulva(it) else 1.0 / max(len(neg), 1) for it in train_items]
     sampler = torch.utils.data.WeightedRandomSampler(weights, num_samples=len(train_items), replacement=True)
     dl = DataLoader(SegData(train_items, augment=True), batch_size=batch_size, sampler=sampler, num_workers=0)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -185,10 +261,10 @@ def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_siz
     for ep in range(epochs):
         model.train()
         tot = 0.0
-        for x, y in dl:
-            x, y = x.to(device), y.to(device)
+        for x, y, kn in dl:
+            x, y, kn = x.to(device), y.to(device), kn.to(device)
             opt.zero_grad()
-            loss = loss_fn(model(x), y, pos_weight)
+            loss = loss_fn(model(x), y, pos_weight, kn)
             loss.backward()
             opt.step()
             sched.step()
@@ -204,18 +280,32 @@ def predict_probs(model, items, device):
     out = []
     for i in range(0, len(items), 16):
         x = torch.stack([to_tensor(it["image"]) for it in items[i:i + 16]]).to(device)
-        out.extend(torch.sigmoid(model(x))[:, 0].cpu().numpy().astype(np.float16))
+        logits = model(x)
+        if logits.shape[1] == 3:              # keep vulva and tail; background = 1 - both
+            out.extend(torch.softmax(logits, 1)[:, 1:].cpu().numpy().astype(np.float16))
+        else:
+            out.extend(torch.sigmoid(logits)[:, 0].cpu().numpy().astype(np.float16))
     return out
+
+
+def full_probs(p):
+    """Stored probabilities -> what parts_from_probs takes: H x W (vulva) or 3 x H x W (bg, vulva, tail)."""
+    p = p.astype(np.float32)
+    if p.ndim == 3 and p.shape[0] == 2:
+        return np.concatenate([np.clip(1 - p.sum(0, keepdims=True), 0, 1), p], 0)
+    return p
+
+
+def vulva_prob(p):
+    return p[0] if p.ndim == 3 else p
 
 
 def masks_from_probs(probs, threshold=0.5):
-    out = []
-    for p in probs:
-        m = largest_component((p.astype(np.float32) >= threshold).astype(np.uint8))
-        if m.sum() < MIN_AREA:
-            m[:] = 0
-        out.append(m)
-    return out
+    return [parts_from_probs(full_probs(p), threshold, MIN_AREA)[0] for p in probs]
+
+
+def tails_from_probs(probs):
+    return [parts_from_probs(full_probs(p), 0.5, MIN_AREA)[2] for p in probs]
 
 
 def predict_items(model, items, device, threshold=0.5):
@@ -237,7 +327,7 @@ def pick_presence_cut(items, masks, confs, target=0.9):
     (the lowest such cut keeps the most real frames). 0.0 = no cut; None = target not reachable."""
     if target <= 0:
         return 0.0
-    truth = [bool(it["mask"].any()) for it in items]
+    truth = [has_vulva(it) for it in items]
     called = [bool(m.any()) for m in masks]
     for c in sorted({round(float(x), 4) for x, v in zip(confs, called) if v}):
         tp = sum(1 for t, v, x in zip(truth, called, confs) if t and v and x >= c)
@@ -251,7 +341,7 @@ def score(items, preds):
     tp = fp = fn = tn = 0
     ious, dices, area_err = [], [], []
     for it, pm in zip(items, preds):
-        t, p = it["mask"].astype(bool), pm.astype(bool)
+        t, p = it["mask"] == 1, pm.astype(bool)
         tv, pv = t.any(), p.any()
         if tv and pv:
             tp += 1
@@ -294,8 +384,11 @@ def main():
                     help="BCE weight on vulva pixels; above 1 grows masks (Dice already handles imbalance)")
     ap.add_argument("--inputs", choices=INPUTS, default="ir",
                     help='"ir" or "ir+depth" (IR, height above the skin and 3D shading as the 3 channels)')
-    ap.add_argument("--presence-precision", type=float, default=0.9,
-                    help="tune the 'vulva visible' confidence cut to this out-of-fold precision (0 = no cut)")
+    ap.add_argument("--presence-precision", type=float, default=None,
+                    help="tune the 'vulva visible' confidence cut to this out-of-fold precision (0 = no cut; "
+                         "default 0.9 for 2 classes, 0 for 3)")
+    ap.add_argument("--classes", type=int, choices=(2, 3), default=2,
+                    help="2 = vulva vs not; 3 = background / vulva / tail (tail_labels.csv from label_tail.py)")
     ap.add_argument("--no-pretrained", action="store_true", help="random init (tests / offline)")
     ap.add_argument("--out-model", default=os.path.join("models", "vulva_seg.pth"))
     ap.add_argument("--out-dir", default=os.path.join("outputs", "vulva_seg"))
@@ -310,6 +403,8 @@ def main():
     ap.add_argument("--items-cache", default="", help=argparse.SUPPRESS)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+    if args.presence_precision is None:
+        args.presence_precision = 0.0 if args.classes == 3 else 0.9
     global SCALE_AUG
     SCALE_AUG = tuple(float(v) for v in args.scale_aug.split(","))
     args.frames_roots = [r for r in args.frames_root.split(";") if r.strip()]
@@ -328,16 +423,20 @@ def main():
         log_lines.append(s)
 
     t0 = time.time()
-    items = load_labels(args.labels, args.inputs, args.frames_roots)
+    items = load_labels(args.labels, args.inputs, args.frames_roots, args.classes)
     pigs = sorted({it["pig_id"] for it in items})
-    n_pos = int(sum(bool(it["mask"].any()) for it in items))
+    n_pos = int(sum(has_vulva(it) for it in items))
     log(f"{len(items)} frames from {len(pigs)} sows: {n_pos} with a vulva mask, {len(items) - n_pos} without"
-        f"  (inputs: {args.inputs})")
+        f"  (inputs: {args.inputs}, classes: {args.classes})")
+    if args.classes == 3:
+        known = [it for it in items if it["tail_known"]]
+        log(f"  tail looked at in {len(known)} frames, outlined in {sum(1 for it in known if (it['mask'] == 2).any())}")
     if n_pos == 0:
         sys.exit("No vulva masks found; check --labels and the mask paths.")
 
     report = {"labels": args.labels, "frames": len(items), "present": n_pos, "sows": pigs,
-              "epochs": args.epochs, "device": device, "inputs": args.inputs, "scale_aug": args.scale_aug}
+              "epochs": args.epochs, "device": device, "inputs": args.inputs, "scale_aug": args.scale_aug,
+              "classes": args.classes}
     if args.folds and len(pigs) >= args.folds:
         folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
         report["folds"] = {str(k): sorted(p for p, f in folds.items() if f == k) for k in range(args.folds)}
@@ -355,7 +454,7 @@ def main():
                 log(f"Fold {k + 1}/{args.folds}: test sows {report['folds'][str(k)]} "
                     f"({len(te_idx)} frames, train {len(tr)})")
                 model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                                    args.pos_weight)
+                                    args.pos_weight, args.classes)
                 probs = predict_probs(model, [items[i] for i in te_idx], device)
                 for i, pr in zip(te_idx, probs):
                     oof_probs[i] = pr
@@ -368,12 +467,13 @@ def main():
     log("")
     log(f"Final model on all {len(items)} frames ...")
     if args.jobs > 1 and args.folds and len(pigs) >= args.folds:
-        model = VulvaUNet(pretrained=False)
+        model = VulvaUNet(pretrained=False, n_out=3 if args.classes == 3 else 1)
         model.load_state_dict(final_state)
     else:
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                            args.pos_weight)
+                            args.pos_weight, args.classes)
     save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold, "inputs": args.inputs,
+                                            "classes": args.classes,
                                             "presence_threshold": presence, "scale_aug": args.scale_aug,
                                             "trained_on": len(items), "sows": pigs,
                                             "date": time.strftime("%Y-%m-%d")})
@@ -399,11 +499,11 @@ def run_job(args):
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     log = lambda s: print(s, flush=True)  # noqa: E731
     items = load_items(args.items_cache) if args.items_cache else load_labels(args.labels, args.inputs,
-                                                                               args.frames_roots)
+                                                                               args.frames_roots, args.classes)
     if k == args.folds:
         log(f"Final model on all {len(items)} frames ({device})")
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                            args.pos_weight)
+                            args.pos_weight, args.classes)
         torch.save(model.state_dict(), os.path.join(args.job_dir, "final.pt"))
         return
     folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
@@ -411,7 +511,7 @@ def run_job(args):
     te = [it for it in items if folds[it["pig_id"]] == k]
     log(f"Fold {k + 1}/{args.folds}: {len(te)} test frames, train {len(tr)} ({device})")
     model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                        args.pos_weight)
+                        args.pos_weight, args.classes)
     probs = predict_probs(model, te, device)
     np.savez(os.path.join(args.job_dir, f"fold{k}.npz"), keys=np.array([it["row"]["ir_path"] for it in te]),
              probs=np.stack(probs))
@@ -429,7 +529,8 @@ def run_parallel(args, items, folds, report, log):
     cmd = [sys.executable, os.path.abspath(__file__), "--labels", *args.labels, "--folds", str(args.folds),
            "--epochs", str(args.epochs), "--batch-size", str(args.batch_size), "--lr", str(args.lr),
            "--pos-weight", str(args.pos_weight), "--inputs", args.inputs, "--seed", str(args.seed),
-           "--job-dir", job_dir, "--scale-aug", args.scale_aug] + (["--no-pretrained"] if args.no_pretrained else [])
+           "--job-dir", job_dir, "--scale-aug", args.scale_aug, "--classes", str(args.classes),
+           "--presence-precision", str(args.presence_precision)] + (["--no-pretrained"] if args.no_pretrained else [])
     cache = os.path.join(job_dir, "items.npz")    # the frames as loaded here: workers do not touch the share
     save_items(items, cache)
     cmd += ["--items-cache", cache]
@@ -490,22 +591,32 @@ def run_parallel(args, items, folds, report, log):
 
 
 def finish_cv(args, items, folds, oof_probs, per_fold, report, log):
-    """Out-of-fold probabilities -> outline threshold, confidence cut, report and per-frame CSV."""
-    threshold, overall, by_thr = pick_threshold(items, oof_probs)
-    oof = masks_from_probs(oof_probs, threshold)
+    """Out-of-fold probabilities -> outline threshold, confidence cut, report and per-frame CSV.
+    3 classes: the vulva is where its class wins (no threshold); the report adds the tail rule
+    (a vulva touching a tail is partly covered and dropped) and how well tails are found."""
+    three = args.classes == 3
+    if three:
+        threshold, by_thr = 0.5, []
+        oof = masks_from_probs(oof_probs, threshold)
+        overall = score(items, oof)
+    else:
+        threshold, overall, by_thr = pick_threshold(items, oof_probs)
+        oof = masks_from_probs(oof_probs, threshold)
     report["cv"] = {"overall": overall, "per_fold_at_0.5": per_fold, "threshold": threshold,
                     "by_threshold": {str(t): {k: s[k] for k in ("presence_f1", "iou_mean", "area_error_mean")}
                                      for t, s in by_thr}}
     c = overall["confusion"]
     log("")
-    log(f"Cross-validation (sows held out), {overall['frames']} frames, mask threshold {threshold}:")
+    log(f"Cross-validation (sows held out), {overall['frames']} frames, "
+        + ("vulva where its class wins:" if three else f"mask threshold {threshold}:"))
     log(f"  Vulva visible: precision {overall['presence_precision']}, recall {overall['presence_recall']}, "
         f"F1 {overall['presence_f1']}, accuracy {overall['presence_accuracy']}")
     log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
     log(f"  Mask on frames both call visible: IoU {overall['iou_mean']}, Dice {overall['dice_mean']}, "
         f"area error {overall['area_error_mean']}")
-    peaks = [float(p.max()) for p in oof_probs]
-    confs = [blob_confidence(p, m) for p, m in zip(oof_probs, oof)]
+    vprobs = [vulva_prob(p.astype(np.float32)) for p in oof_probs]
+    peaks = [float(p.max()) for p in vprobs]
+    confs = [blob_confidence(p, m) for p, m in zip(vprobs, oof)]
     presence = pick_presence_cut(items, oof, confs, args.presence_precision)
     if presence is None:
         log(f"  No confidence cut reaches precision {args.presence_precision}; using none")
@@ -514,28 +625,62 @@ def finish_cv(args, items, folds, oof_probs, per_fold, report, log):
     cut = score(items, kept)
     report["cv"]["presence_cut"] = {"score": "mean prob in blob", "threshold": presence,
                                     "target_precision": args.presence_precision, "overall": cut}
-    c = cut["confusion"]
-    spec = c["tn"] / max(c["tn"] + c["fp"], 1)
-    log(f"With confidence cut {presence} (target precision {args.presence_precision}; used by run_vulva):")
-    log(f"  Vulva visible: precision {cut['presence_precision']}, recall {cut['presence_recall']}, "
-        f"specificity {spec:.3f}, F1 {cut['presence_f1']}")
-    log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
-    log(f"  Mask on frames both call visible: IoU {cut['iou_mean']}, Dice {cut['dice_mean']}, "
-        f"area error {cut['area_error_mean']}")
+    if presence > 0:
+        c = cut["confusion"]
+        spec = c["tn"] / max(c["tn"] + c["fp"], 1)
+        log(f"With confidence cut {presence} (target precision {args.presence_precision}; used by run_vulva):")
+        log(f"  Vulva visible: precision {cut['presence_precision']}, recall {cut['presence_recall']}, "
+            f"specificity {spec:.3f}, F1 {cut['presence_f1']}")
+        log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
+        log(f"  Mask on frames both call visible: IoU {cut['iou_mean']}, Dice {cut['dice_mean']}, "
+            f"area error {cut['area_error_mean']}")
+    tails, touch = [None] * len(items), [False] * len(items)
+    if three:
+        tails = tails_from_probs(oof_probs)
+        touch = [touches(m, t) for m, t in zip(kept, tails)]
+        kept_t = [np.zeros_like(m) if tc else m for m, tc in zip(kept, touch)]
+        st = score(items, kept_t)
+        c = st["confusion"]
+        spec = c["tn"] / max(c["tn"] + c["fp"], 1)
+        report["cv"]["tail_rule"] = st
+        log("With the tail rule (a vulva touching a tail is partly covered: dropped; used by run_vulva):")
+        log(f"  Vulva visible: precision {st['presence_precision']}, recall {st['presence_recall']}, "
+            f"specificity {spec:.3f}, F1 {st['presence_f1']}")
+        log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
+        known = [i for i, it in enumerate(items) if it.get("tail_known")]
+        with_tail = [i for i in known if (items[i]["mask"] == 2).any()]
+        found = [i for i in with_tail if tails[i] is not None and tails[i].any()]
+        no_tail = [i for i in known if i not in with_tail]
+        false_tail = [i for i in no_tail if tails[i] is not None and tails[i].any()]
+        ious = []
+        for i in found:
+            tt, pp = items[i]["mask"] == 2, tails[i].astype(bool)
+            ious.append(float((tt & pp).sum() / (tt | pp).sum()))
+        report["cv"]["tail"] = {"looked_at": len(known), "with_tail": len(with_tail), "found": len(found),
+                                "false_tail": len(false_tail), "iou_mean": round(float(np.mean(ious)), 3)
+                                if ious else None}
+        log(f"  Tails (frames whose tail was outlined or marked none): found in {len(found)} of {len(with_tail)}"
+            f" with a tail, drawn in {len(false_tail)} of {len(no_tail)} without"
+            + (f"; tail IoU {np.mean(ious):.3f}" if ious else ""))
     with open(os.path.join(args.out_dir, "cv_predictions.csv"), "w", newline="") as f:
         w = csv.writer(f)
         # per frame, so results can be split later (e.g. hand-drawn vs accepted model suggestions)
         # pred_area_px / iou are before the confidence cut; peak_prob and blob_conf let it be re-tuned
         w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "fold",
-                    "pred_area_px", "true_area_px", "iou", "peak_prob", "blob_conf"])
-        for it, p, pk, cf in zip(items, oof, peaks, confs):
+                    "pred_area_px", "true_area_px", "iou", "peak_prob", "blob_conf",
+                    "tail_known", "tail_true_px", "tail_pred_px", "touches_tail"])
+        for it, p, pk, cf, tl, tc in zip(items, oof, peaks, confs, tails, touch):
             r = it["row"]
-            t, q = it["mask"].astype(bool), p.astype(bool)
+            t, q = it["mask"] == 1, p.astype(bool)
             iou = round(float((t & q).sum() / (t | q).sum()), 4) if (t.any() and q.any()) else ""
-            w.writerow([r["timestamp_folder"], r["pig_id"], r["pig_timestamp"], r["label"], r.get("how", ""),
-                        folds[it["pig_id"]], int(p.sum()), int(it["mask"].sum()), iou,
-                        round(pk, 4), round(cf, 4)])
+            w.writerow([r.get("timestamp_folder", ""), r.get("pig_id", ""), r.get("pig_timestamp", ""),
+                        r.get("label", ""), r.get("how", ""), folds[it["pig_id"]], int(p.sum()), int(t.sum()), iou,
+                        round(pk, 4), round(cf, 6),
+                        int(bool(it.get("tail_known"))) if three else "",
+                        int((it["mask"] == 2).sum()) if three else "",
+                        int(tl.sum()) if tl is not None else "", int(tc) if three else ""])
     return threshold, presence
+
 
 def copy_results(model_path, out_dir, dest):
     """Plain read/write copy (Windows CopyFile, used by PowerShell copy, is refused on \\\\tsclient shares).

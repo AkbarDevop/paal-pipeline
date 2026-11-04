@@ -42,13 +42,15 @@ sys.path.insert(0, os.path.dirname(HERE))
 from measure3d import load_depth_raw, load_intrinsics, measure  # noqa: E402
 from rgb_align import register  # noqa: E402
 from keep_rule import keep, rule_from_checkpoint  # noqa: E402
-from seg_model import default_depth_path, ir_channel, load_checkpoint, predict, read_input, read_mask  # noqa: E402
+from seg_model import default_depth_path, ir_channel, load_checkpoint, predict_parts, read_input, read_mask  # noqa: E402
 
 FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "note", "how", "verdict", "model_visible",
           "model_visible_before_cut", "blob_conf", "iou", "human_width_mm", "model_width_mm",
           "human_length_mm", "model_length_mm", "human_peak_height_mm", "model_peak_height_mm",
-          "model_mean_height_mm", "model_area_mm2", "model_distance_mm", "human_status", "model_status", "ir_path"]
-ORDER = {"false alarm": 0, "missed": 1, "dropped by cut": 2, "both visible": 3, "both not visible": 4}
+          "model_mean_height_mm", "model_area_mm2", "model_distance_mm", "human_status", "model_status",
+          "touches_tail", "model_tail_px", "ir_path"]
+ORDER = {"false alarm": 0, "missed": 1, "dropped by cut": 2, "dropped (touches tail)": 2, "both visible": 3,
+         "both not visible": 4}
 
 
 def read_rows(labels_csv, frames_roots=None):
@@ -89,15 +91,18 @@ def evaluate(model, ckpt, rows, device, K=None):
         human = read_mask(r["mask_path"]) if r["label"] == "present" else None
         if r["label"] == "present" and (human is None or not human.any()):
             continue
-        mask, _pmax, _area, conf = predict(model, [img], device, thr, min_area)[0]
+        d = predict_parts(model, [img], device, thr, min_area)[0]
+        mask, conf, tail_touch = d["vulva"], d["conf"], d["touches_tail"]
         before = bool(mask.any())
         truth = r["label"] == "present"
         depth = load_depth_raw(r["depth_path"]) if os.path.exists(r["depth_path"]) else None
         hm = measure(depth, human, K) if truth else {}
         mm = measure(depth, mask, K) if before else {}
         measured = mm.get("measure_status") == "ok"
-        visible = before and keep(conf, mm.get("peak_height_mm") if measured else None, measured, rule)
-        verdict = ("both visible" if truth and visible else "dropped by cut" if truth and before else
+        visible = (before and not tail_touch
+                   and keep(conf, mm.get("peak_height_mm") if measured else None, measured, rule))
+        verdict = ("both visible" if truth and visible else
+                   ("dropped (touches tail)" if tail_touch else "dropped by cut") if truth and before else
                    "missed" if truth else "false alarm" if visible else "both not visible")
         iou = ""
         if truth and before:
@@ -113,10 +118,11 @@ def evaluate(model, ckpt, rows, device, K=None):
                     "human_peak_height_mm": hm.get("peak_height_mm", ""),
                     "model_peak_height_mm": mm.get("peak_height_mm", ""),
                     "model_mean_height_mm": mm.get("mean_height_mm", ""), "model_area_mm2": mm.get("area_mm2", ""),
-                    "model_distance_mm": mm.get("distance_mm", ""),
+                    "model_distance_mm": mm.get("distance_mm", ""), "touches_tail": int(tail_touch),
+                    "model_tail_px": int(d["tail"].sum()) if d["tail"] is not None else "",
                     "human_status": hm.get("measure_status", ""), "model_status": mm.get("measure_status", ""),
                     "ir_path": r["ir_path"], "_ir": ir_channel(img), "_human": human, "_model": mask,
-                    "_rgb": (r.get("rgb_reg", ""), r.get("rgb_plain", ""))})
+                    "_rgb": (r.get("rgb_reg", ""), r.get("rgb_plain", "")), "_tail": d["tail"]})
     return out
 
 
@@ -154,6 +160,8 @@ def summarise(frames, rule):
              f"{sum(f['label'] == 'absent' for f in frames)} without"]
     how = (f"conf >= {rule['conf_high']}, or conf >= {rule['conf_low']} and bump >= {rule['min_peak_mm']} mm"
            if rule["conf_low"] < rule["conf_high"] else f"confidence cut {rule['conf_high']}")
+    if any(f.get("touches_tail") for f in frames) or any(f.get("model_tail_px") not in ("", None) for f in frames):
+        how += ", and not touching a tail"
     for name, key in ((f"Kept ({how}, as run_vulva.py decides)", "model_visible"),
                       ("Before the cut", "model_visible_before_cut")):
         tp, fn, fp, tn, p, r, s, f1 = conf_at(key)
@@ -161,6 +169,9 @@ def summarise(frames, rule):
                   f"  vulva visible: precision {p:.3f}, recall {r:.3f}, specificity {s:.3f}, F1 {f1:.3f}",
                   f"  confusion (rows true present/absent): [[{tp}, {fn}], [{fp}, {tn}]]"]
     both = [f for f in frames if f["verdict"] == "both visible"]
+    tt = sum(1 for f in frames if f["verdict"] == "dropped (touches tail)")
+    if tt:
+        lines.append(f"Vulvas dropped because the model drew a tail touching them: {tt}")
     ious = [f["iou"] for f in both if f["iou"] != ""]
     if ious:
         lines.append(f"Outline on frames both call visible ({len(ious)}): IoU mean {np.mean(ious):.3f}, "
@@ -192,7 +203,8 @@ def tile(f, size=200, half=110, colour=True):
     rgb = colour_view(f) if colour else None
     t = rgb[y1:y2, x1:x2].copy() if rgb is not None else cv2.cvtColor(cv2.equalizeHist(ir[y1:y2, x1:x2]),
                                                                        cv2.COLOR_GRAY2BGR)
-    for m, col in ((hm, (60, 200, 60)), (md, (0, 220, 255) if f["model_visible"] else (0, 140, 255))):
+    for m, col in ((f.get("_tail"), (60, 60, 255)), (hm, (60, 200, 60)),
+                   (md, (0, 220, 255) if f["model_visible"] else (0, 140, 255))):
         if m is not None and m.any():
             cnts, _ = cv2.findContours(m[y1:y2, x1:x2].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
             cv2.drawContours(t, cnts, -1, col, 2 if rgb is not None else 1)

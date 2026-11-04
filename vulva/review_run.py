@@ -6,7 +6,8 @@ again on just those frames and writes, under --out-dir:
 
   panels/<pig>_<timestamp>.jpg   one row per frame:
       colour image | IR image | height above the skin (depth) | 3D view of the surface
-      with the model's outline (yellow; orange if the confidence check dropped it) and the
+      with the model's outline (yellow; orange if the confidence check dropped it; a tail
+      the model found, 3-class models, in red) and the
       frame's numbers underneath: width, length, protrusion, volume, confidence, distance
   index.jpg                      all panels of this review, smaller, one under another
   sheet_01.jpg, sheet_02.jpg ... contact sheets for fast checking: 48 frames per page (8 x 6),
@@ -18,7 +19,7 @@ again on just those frames and writes, under --out-dir:
                                  or: python vulva/view_pointcloud.py <file>.ply
 
 Which frames (--which): ok = measured, low_confidence = outline dropped by the confidence
-check, not_visible = no outline, all. The colour image is a separate camera matched onto the
+check, tail_covered = vulva touching a tail (3-class models), not_visible = no outline, all. The colour image is a separate camera matched onto the
 IR (rgb_align.py); the model itself only sees the IR image.
 
 Usage:
@@ -47,7 +48,7 @@ from depth_views import views_for  # noqa: E402
 from measure3d import DEFAULT_INTRINSICS as K  # noqa: E402
 from measure3d import backproject, fit_plane, load_depth_raw  # noqa: E402
 from rgb_align import register  # noqa: E402
-from seg_model import ir_channel, load_checkpoint, predict, read_input  # noqa: E402
+from seg_model import ir_channel, load_checkpoint, predict_parts, read_input  # noqa: E402
 from select_frames import depth_path_for  # noqa: E402
 
 P = 300            # panel size, px
@@ -72,14 +73,16 @@ def crop(img, cx, cy, half=HALF):
     return img[y1:y1 + 2 * half, x1:x1 + 2 * half], (x1, y1)
 
 
-def outlined(img, mask, x1y1, colour, half=HALF):
+def outlined(img, mask, x1y1, colour, half=HALF, tail=None):
+    """Crop -> panel size, with the model's vulva outline (colour) and tail outline (red), if any."""
     x1, y1 = x1y1
     t = cv2.resize(img, (P, P), interpolation=cv2.INTER_CUBIC)
-    if mask is not None and mask.any():
-        sc = P / (2 * half)
-        cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        cnts = [np.round((c - [x1, y1]) * sc).astype(np.int32) for c in cnts]
-        cv2.drawContours(t, cnts, -1, colour, 2)
+    sc = P / (2 * half)
+    for m, col in ((tail, (60, 60, 255)), (mask, colour)):
+        if m is not None and m.any():
+            cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            cnts = [np.round((c - [x1, y1]) * sc).astype(np.int32) for c in cnts]
+            cv2.drawContours(t, cnts, -1, col, 2)
     return t
 
 
@@ -187,7 +190,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("frames_csv", help="vulva_frames.csv from run_vulva.py")
     ap.add_argument("--model", required=True, help="the checkpoint the run used")
-    ap.add_argument("--which", default="ok", choices=("ok", "low_confidence", "not_visible", "all"))
+    ap.add_argument("--which", default="ok", choices=("ok", "low_confidence", "tail_covered", "not_visible", "all"))
     ap.add_argument("--n", type=int, default=24, help="frames to show (random, seeded)")
     ap.add_argument("--ply", type=int, default=0, help="also write 3D point clouds for this many frames")
     ap.add_argument("--seed", type=int, default=0)
@@ -222,7 +225,8 @@ def main():
         if img is None:
             continue
         gray = ir_channel(img)
-        mask, _pmax, _area, conf = predict(model, [img], device, thr, min_area)[0]
+        d = predict_parts(model, [img], device, thr, min_area)[0]
+        mask, conf, tail = d["vulva"], d["conf"], d["tail"]
         has = mask.any()
         if has:
             ys, xs = np.nonzero(mask)
@@ -230,7 +234,7 @@ def main():
         else:
             cx, cy = 310, 255
         half = HALF if has else WIDE
-        col = (0, 215, 255) if has and conf >= cut else (0, 140, 255)
+        col = (0, 215, 255) if has and conf >= cut and not d["touches_tail"] else (0, 140, 255)
         depth = load_depth_raw(dpath)
         rgb = colour_for(ir_path, gray, (cx, cy) if has else None)
         tiles = []
@@ -240,18 +244,18 @@ def main():
         ts = r["pig_timestamp"]
         src = rgb if rgb is not None else cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
         c, o = crop(src, cx, cy, half)
-        sheet.append(sheet_tile(outlined(c, mask, o, col, half),
+        sheet.append(sheet_tile(outlined(c, mask, o, col, half, tail),
                                 f"p{r['pig_id']} {ts[4:6]}/{ts[6:8]} {ts[9:11]}:{ts[12:14]}",
                                 f"conf {conf:.3f}" if has else "nothing drawn"))
         if args.sheet_only:
             continue
         if rgb is not None:
             c, o = crop(rgb, cx, cy, half)
-            tiles.append(label(outlined(c, mask, o, col, half), "colour (matched to IR)"))
+            tiles.append(label(outlined(c, mask, o, col, half, tail), "colour (matched to IR)"))
         else:
             tiles.append(label(np.full((P, P, 3), 40, np.uint8), "no colour image"))
         c, o = crop(cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR), cx, cy, half)
-        tiles.append(label(outlined(c, mask, o, col, half), "IR (contrast-boosted)"))
+        tiles.append(label(outlined(c, mask, o, col, half, tail), "IR (contrast-boosted)"))
         v = views_for(dpath)
         if v is not None:
             c, o = crop(cv2.cvtColor(v[1], cv2.COLOR_RGB2BGR), cx, cy, half)

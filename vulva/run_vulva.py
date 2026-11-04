@@ -36,12 +36,12 @@ from daily import METRICS, add_baseline_change, aggregate, compare_truth  # noqa
 from keep_rule import keep as keep_blob, rule_from_checkpoint  # noqa: E402
 from measure3d import MEASURE_FIELDS, load_depth_raw, load_intrinsics, measure  # noqa: E402
 from rgb_align import register  # noqa: E402
-from seg_model import ir_channel, load_checkpoint, predict, read_input  # noqa: E402
+from seg_model import ir_channel, load_checkpoint, predict_parts, read_input  # noqa: E402
 from select_frames import parse_windows, relocate, select  # noqa: E402
 
 FRAME_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence",
                 "vulva_visible", "vulva_prob", "vulva_conf", "mask_area_px"] + MEASURE_FIELDS + \
-               ["blob_status", "ir_path", "mask_path"]
+               ["blob_status", "touches_tail", "ir_path", "mask_path"]
 
 
 def write_csv(rows, path, fields=None):
@@ -145,7 +145,7 @@ def main():
         ok = [j for j, g in enumerate(grays) if g is not None]
         # every blob is measured; keep_rule decides which count, so a later rule can be re-applied
         # to vulva_frames.csv (keep_rule.py --apply) without running the model again
-        res = predict(model, [grays[j] for j in ok], device, thr, min_area, args.batch_size)
+        res = predict_parts(model, [grays[j] for j in ok], device, thr, min_area, args.batch_size)
         res_by = dict(zip(ok, res))
         for j, c in enumerate(chunk):
             row = {k: c[k] for k in ("timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence", "ir_path")}
@@ -153,10 +153,13 @@ def main():
                 row.update({"vulva_visible": "", "measure_status": "unreadable_ir"})
                 rows.append(row)
                 continue
-            mask, prob, area, conf = res_by[j]
+            d = res_by[j]
+            mask, prob, area, conf, tail_touch = d["vulva"], d["pmax"], d["area"], d["conf"], d["touches_tail"]
             m = measure(load_depth_raw(c["depth_path"]), mask, K) if mask.any() else None
             measured = m is not None and m["measure_status"] == "ok"
-            kept = m is not None and keep_blob(conf, m["peak_height_mm"] if measured else None, measured, rule)
+            kept = (m is not None and not tail_touch
+                    and keep_blob(conf, m["peak_height_mm"] if measured else None, measured, rule))
+            row["touches_tail"] = int(tail_touch)
             row.update({"vulva_visible": int(kept), "vulva_prob": round(prob, 4),
                         "vulva_conf": round(conf, 4), "mask_area_px": area})
             if m is not None:
@@ -173,7 +176,8 @@ def main():
                     tiles.append(overlay_tile(gray, mask, f"p{c['pig_id']} {c['pig_timestamp'][4:13]} "
                                               f"W{m['width_mm']:.0f} L{m['length_mm']:.0f}", colour=colour))
             elif m is not None:
-                row["measure_status"] = "low_confidence"   # drawn but dropped; its numbers stay for re-tuning
+                # drawn but dropped (partly covered by a tail, or unsure); its numbers stay for re-tuning
+                row["measure_status"] = "tail_covered" if tail_touch else "low_confidence"
             else:
                 row["measure_status"] = "not_visible"
             rows.append(row)
@@ -193,10 +197,13 @@ def main():
     visible = sum(1 for r in rows if r.get("vulva_visible") == 1)
     good = sum(1 for r in rows if r.get("measure_status") == "ok")
     unsure = sum(1 for r in rows if r.get("measure_status") == "low_confidence")
-    summary = {"frames": len(rows), "visible": visible, "low_confidence": unsure, "measured_ok": good,
+    covered = sum(1 for r in rows if r.get("measure_status") == "tail_covered")
+    summary = {"frames": len(rows), "visible": visible, "low_confidence": unsure, "tail_covered": covered,
+               "measured_ok": good,
                "sow_days": len(daily), "model": args.model, "presence_threshold": presence, "keep_rule": rule,
                "seconds": round(time.time() - t0, 1)}
-    print(f"Vulva visible in {visible} of {len(rows)} standing frames ({unsure} more dropped as low confidence); "
+    print(f"Vulva visible in {visible} of {len(rows)} standing frames ({unsure} more dropped as low confidence"
+          + (f", {covered} as partly covered by the tail" if covered else "") + "); "
           f"measured {good}; {len(daily)} sow-days with at least {args.min_frames} good frames")
 
     if args.truth:

@@ -393,7 +393,7 @@ def test_train_and_run_end_to_end():
         assert all(r["measure_status"] for r in rows)
         assert "vulva_conf" in rows[0]
         with open(os.path.join(tmp, "seg", "cv_predictions.csv")) as f:
-            assert f.readline().strip().endswith("peak_prob,blob_conf")
+            assert "peak_prob,blob_conf" in f.readline()
         assert "With confidence cut" in out_train or "No confidence cut" in out_train
         assert os.path.exists(os.path.join(outdir, "vulva_daily.csv"))
         assert os.path.exists(os.path.join(outdir, "vulva_summary.json"))
@@ -403,7 +403,7 @@ def test_train_and_run_end_to_end():
                               "--epochs", "3", "--no-pretrained", "--inputs", "ir+depth", "--out-model", model_d,
                               "--out-dir", os.path.join(tmp, "seg_d")], capture_output=True, text=True, cwd=tmp)
         assert out.returncode == 0, out.stderr[-2000:]
-        assert "(inputs: ir+depth)" in out.stdout
+        assert "(inputs: ir+depth" in out.stdout
         import torch
         assert torch.load(model_d, map_location="cpu", weights_only=False)["inputs"] == "ir+depth"
         assert "presence_threshold" in torch.load(model, map_location="cpu", weights_only=False)
@@ -917,6 +917,219 @@ def test_retune_cut_on_normal_frames_only():
         saved = torch.load(ck2, weights_only=False)
         assert saved["presence_threshold"] == c_norm and saved["presence_threshold_train_all"] == c_all
         assert torch.load(ck, weights_only=False)["presence_threshold"] == c_all        # original untouched
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_label_tail_canvas_files_and_order():
+    """label_tail.py: strokes (curved tail = clicks along it), polygon, brush erase and undo build
+    the mask; save / load round trip; tail-labelled frames come first; covers_vulva is set."""
+    from label_tail import TailCanvas, frame_order, load_tail_labels, save_tail, save_tail_labels, stroke_mask
+    one = stroke_mask([(100, 100)], 10)
+    assert 60 < one.astype(bool).sum() < 110                     # a round blob of diameter ~10
+    cv_ = TailCanvas(width=10)
+    for p in [(300, 100), (310, 160), (330, 220), (320, 280)]:   # a curved tail, four clicks along it
+        cv_.click(*p)
+    m = cv_.mask() > 0
+    assert m[100, 300] and m[220, 330] and m[190, 320] and not m[100, 400]
+    cv_.finish_part()
+    cv_.set_mode("polygon")
+    for p in [(200, 300), (240, 300), (240, 340), (200, 340)]:
+        cv_.click(*p)
+    cv_.finish_part()
+    assert cv_.mask()[320, 220] > 0 and "polygon" in cv_.hows
+    cv_.set_mode("brush")
+    cv_.brush(220, 320, erase=True, new_drag=True)
+    assert cv_.mask()[320, 220] == 0
+    cv_.undo()
+    assert cv_.mask()[320, 220] > 0
+    tmp = tempfile.mkdtemp()
+    try:
+        done = {}
+        vm = np.zeros((480, 640), np.uint8)
+        cv2.ellipse(vm, (320, 290), (12, 20), 0, 0, 360, 255, -1)
+        rows = [{"ir_path": "a/pig1_ir_vis_x.jpg", "pig_id": "1", "timestamp_folder": "a", "pig_timestamp": "t1",
+                 "label": "present", "note": ""},
+                {"ir_path": "a/pig2_ir_vis_x.jpg", "pig_id": "2", "timestamp_folder": "a", "pig_timestamp": "t2",
+                 "label": "absent", "note": "tail"},
+                {"ir_path": "a/pig3_ir_vis_x.jpg", "pig_id": "3", "timestamp_folder": "a", "pig_timestamp": "t3",
+                 "label": "absent", "note": ""}]
+        assert [r["pig_id"] for r in frame_order(rows, done)] == ["2", "1", "3"]
+        out = save_tail(tmp, done, rows[0], cv_.mask(), vm, "stroke+polygon", 10)
+        assert out["tail"] == 1 and out["covers_vulva"] == 1
+        save_tail(tmp, done, rows[2], None)
+        path = os.path.join(tmp, "tail_labels.csv")
+        save_tail_labels(path, done)
+        back = load_tail_labels(path)
+        assert back["a/pig1_ir_vis_x.jpg"]["tail"] == "1" and back["a/pig3_ir_vis_x.jpg"]["tail"] == "0"
+        assert cv2.imread(os.path.join(tmp, back["a/pig1_ir_vis_x.jpg"]["tail_mask_path"]), 0).max() == 255
+        assert [r["pig_id"] for r in frame_order(rows, back)] == ["2"]
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_three_class_loss_ignores_unlabelled_tails():
+    """Frames whose tail was never outlined: swapping the background and tail scores on non-vulva
+    pixels must not change the loss (an unlabelled tail is not taught as background)."""
+    import torch
+    from train_seg import loss_fn
+    torch.manual_seed(0)
+    logits = torch.randn(2, 3, 16, 16)
+    target = torch.zeros(2, 1, 16, 16)
+    target[:, :, 4:8, 4:8] = 1
+    swapped = logits[:, [2, 1, 0]]
+    unknown = torch.zeros(2)
+    a, b = loss_fn(logits, target, known=unknown), loss_fn(swapped, target, known=unknown)
+    assert abs(float(a) - float(b)) < 1e-5
+    known = torch.ones(2)
+    assert abs(float(loss_fn(logits, target, known=known)) - float(loss_fn(swapped, target, known=known))) > 1e-3
+
+
+def test_three_class_train_predict_and_eval():
+    """train_seg.py --classes 3 on a set with tail outlines for part of the frames: checkpoint with
+    3 classes, CV report with the tail rule, predict_parts gives a tail mask, eval_seg runs."""
+    from seg_model import load_checkpoint, predict_parts, read_input
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(5)
+        set_dir = os.path.join(tmp, "set")
+        os.makedirs(os.path.join(set_dir, "masks"))
+        os.makedirs(os.path.join(set_dir, "tail_masks"))
+        rows, tails = [], []
+        for k in range(12):
+            folder_name = f"20260124-09-{k:02d}-00"
+            folder = os.path.join(set_dir, folder_name)
+            os.makedirs(folder)
+            pid = k % 6
+            ts = f"20260124-09-{k:02d}-10"
+            present = k % 3 != 0
+            m = _write_frame(folder, pid, ts, present, rng)
+            ir_rel = f"{folder_name}/pig{pid}_ir_vis_{ts}.jpg"
+            ir = cv2.imread(os.path.join(set_dir, ir_rel), 0)
+            tail = np.zeros((480, 640), np.uint8)
+            if k % 2 == 0:                                      # a bright tail hanging above
+                cv2.line(tail, (300, 60), (320, 200), 255, 14)
+                ir[tail > 0] = 230
+                cv2.imwrite(os.path.join(set_dir, ir_rel), ir)
+            mp = ""
+            if present:
+                mp = f"masks/{k}.png"
+                cv2.imwrite(os.path.join(set_dir, mp), m.astype(np.uint8) * 255)
+            rows.append({"ir_path": ir_rel, "mask_path": mp, "label": "present" if present else "absent",
+                         "pig_id": pid, "timestamp_folder": folder_name, "pig_timestamp": ts,
+                         "note": "" if present else "tail"})
+            if k < 8:                                            # tails looked at in 8 of 12 frames
+                tp = ""
+                if tail.any():
+                    tp = f"tail_masks/{k}.png"
+                    cv2.imwrite(os.path.join(set_dir, tp), tail)
+                tails.append({"ir_path": ir_rel, "pig_id": pid, "timestamp_folder": folder_name,
+                              "pig_timestamp": ts, "tail": int(tail.any()), "tail_mask_path": tp})
+        for name, data in (("labels.csv", rows), ("tail_labels.csv", tails)):
+            with open(os.path.join(set_dir, name), "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(data[0]))
+                w.writeheader()
+                w.writerows(data)
+        ck = os.path.join(tmp, "m3.pth")
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels",
+                              os.path.join(set_dir, "labels.csv"), "--classes", "3", "--folds", "2", "--epochs", "2",
+                              "--no-pretrained", "--out-model", ck, "--out-dir", os.path.join(tmp, "o")],
+                             capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-3000:]
+        assert "tail looked at in 8 frames, outlined in 4" in out.stdout, out.stdout[-2000:]
+        assert "With the tail rule" in out.stdout and "Tails (frames whose tail" in out.stdout
+        model, ckpt = load_checkpoint(ck, "cpu")
+        assert ckpt["classes"] == 3 and model.n_out == 3 and ckpt["presence_threshold"] == 0.0
+        img = read_input(os.path.join(set_dir, rows[0]["ir_path"]))
+        d = predict_parts(model, [img], "cpu", ckpt["threshold"], ckpt["min_area"])[0]
+        assert d["tail"] is not None and d["tail"].shape == (480, 640) and d["vulva"].shape == (480, 640)
+        with open(os.path.join(tmp, "o", "cv_predictions.csv")) as f:
+            head = next(csv.reader(f))
+        assert "touches_tail" in head and "tail_known" in head
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "eval_seg.py"), "--model", ck, "--labels",
+                              os.path.join(set_dir, "labels.csv"), "--out-dir", os.path.join(tmp, "ev")],
+                             capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-3000:]
+        with open(os.path.join(tmp, "ev", "eval_frames.csv")) as f:
+            assert "touches_tail" in next(csv.reader(f))
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_label_tail_gui_smoke():
+    """label_tail.py window, driven by simulated clicks and keys (no screen): a curved stroke with a
+    width change, a polygon, a brush erase, Enter saves, x saves 'no tail', q quits."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backend_bases import KeyEvent, MouseEvent
+    import label_tail
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(1)
+        set_dir = os.path.join(tmp, "set")
+        folder = os.path.join(set_dir, "20260124-09-00-00")
+        os.makedirs(folder)
+        os.makedirs(os.path.join(set_dir, "masks"))
+        rows = []
+        for pid in range(3):
+            ts = f"20260124-09-00-{10 + pid:02d}"
+            m = _write_frame(folder, pid, ts, pid == 0, rng)
+            mp = ""
+            if pid == 0:
+                mp = "masks/0.png"
+                cv2.imwrite(os.path.join(set_dir, mp), m.astype(np.uint8) * 255)
+            rows.append({"ir_path": f"20260124-09-00-00/pig{pid}_ir_vis_{ts}.jpg", "mask_path": mp,
+                         "label": "present" if pid == 0 else "absent", "pig_id": pid,
+                         "timestamp_folder": "20260124-09-00-00", "pig_timestamp": ts,
+                         "note": "tail" if pid == 1 else ""})
+        lab = os.path.join(set_dir, "labels.csv")
+        with open(lab, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+
+        def drive():
+            fig = plt.gcf()
+            ax = fig.axes[0]
+            cv = fig.canvas
+
+            def click(x, y, button=1):
+                px, py = ax.transData.transform((x, y))
+                cv.callbacks.process("button_press_event", MouseEvent("button_press_event", cv, px, py, button))
+                cv.callbacks.process("button_release_event", MouseEvent("button_release_event", cv, px, py, button))
+
+            def key(k):
+                cv.callbacks.process("key_press_event", KeyEvent("key_press_event", cv, k))
+
+            # frame 1 (pig 1, labelled tail): curved stroke, wider, then a polygon, a brush erase, save
+            for p in [(300, 80), (310, 140), (325, 200)]:
+                click(*p)
+            key("]")
+            key("n")
+            key("p")
+            for p in [(250, 300), (280, 300), (280, 330)]:
+                click(*p)
+            key("n")
+            key("b")
+            click(325, 200, button=3)
+            key("enter")
+            key("x")         # frame 2 (pig 0, vulva visible): no tail
+            key("q")         # quit before frame 3
+        orig_show, orig_argv = plt.show, sys.argv
+        plt.show = drive
+        sys.argv = ["label_tail.py", lab]
+        try:
+            label_tail.main()
+        finally:
+            plt.show, sys.argv = orig_show, orig_argv
+        done = label_tail.load_tail_labels(os.path.join(set_dir, "tail_labels.csv"))
+        assert set(done) == {rows[1]["ir_path"], rows[0]["ir_path"]}, done
+        r1 = done[rows[1]["ir_path"]]
+        assert r1["tail"] == "1" and "polygon" in r1["how"] and "brush" in r1["how"]
+        tm = cv2.imread(os.path.join(set_dir, r1["tail_mask_path"]), 0)
+        assert tm[140, 310] == 255 and tm[320, 270] == 255 and tm[200, 325] == 0     # stroke, polygon, erased
+        assert done[rows[0]["ir_path"]]["tail"] == "0"
     finally:
         shutil.rmtree(tmp)
 
