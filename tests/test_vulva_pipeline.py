@@ -968,6 +968,21 @@ def test_label_tail_canvas_files_and_order():
         shutil.rmtree(tmp)
 
 
+def test_tail_next_to_vulva_is_not_covering_it():
+    """A tail hanging right above the vulva (normal: the tail root is just above it) does not count;
+    a tail lying across part of the vulva does."""
+    from seg_model import covered_by_tail
+    vul = np.zeros((384, 320), np.uint8)
+    cv2.ellipse(vul, (160, 220), (14, 24), 0, 0, 360, 1, -1)
+    above = np.zeros_like(vul)
+    cv2.line(above, (160, 60), (160, 194), 1, 16)                  # ends just above the vulva top (196)
+    assert not covered_by_tail(vul, above)
+    across = np.zeros_like(vul)
+    cv2.line(across, (160, 60), (160, 230), 1, 16)                 # hangs down over its upper half
+    cut = vul & (1 - across)                                       # the model sees only the uncovered part
+    assert covered_by_tail(cut, across)
+    assert not covered_by_tail(vul, None) and not covered_by_tail(np.zeros_like(vul), across)
+
 def test_three_class_loss_ignores_unlabelled_tails():
     """Frames whose tail was never outlined: swapping the background and tail scores on non-vulva
     pixels must not change the loss (an unlabelled tail is not taught as background)."""
@@ -1033,9 +1048,9 @@ def test_three_class_train_predict_and_eval():
         ck = os.path.join(tmp, "m3.pth")
         out = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels",
                               os.path.join(set_dir, "labels.csv"), "--classes", "3", "--folds", "2", "--epochs", "2",
-                              "--no-pretrained", "--out-model", ck, "--out-dir", os.path.join(tmp, "o")],
+                              "--no-pretrained", "--out-model", ck, "--out-dir", os.path.join(tmp, "o"), "--jobs", "2"],
                              capture_output=True, text=True, cwd=tmp)
-        assert out.returncode == 0, out.stderr[-3000:]
+        assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
         assert "tail looked at in 8 frames, outlined in 4" in out.stdout, out.stdout[-2000:]
         assert "With the tail rule" in out.stdout and "Tails (frames whose tail" in out.stdout
         model, ckpt = load_checkpoint(ck, "cpu")
@@ -1043,15 +1058,19 @@ def test_three_class_train_predict_and_eval():
         img = read_input(os.path.join(set_dir, rows[0]["ir_path"]))
         d = predict_parts(model, [img], "cpu", ckpt["threshold"], ckpt["min_area"])[0]
         assert d["tail"] is not None and d["tail"].shape == (480, 640) and d["vulva"].shape == (480, 640)
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--rescore", "--folds", "2",
+                              "--out-dir", os.path.join(tmp, "o")], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-3000:]
+        assert "Re-scored 12 frames" in out.stdout and "classes 3" in out.stdout and "With the tail rule" in out.stdout
         with open(os.path.join(tmp, "o", "cv_predictions.csv")) as f:
             head = next(csv.reader(f))
-        assert "touches_tail" in head and "tail_known" in head
+        assert "covered_by_tail" in head and "tail_known" in head
         out = subprocess.run([PY, os.path.join(ROOT, "vulva", "eval_seg.py"), "--model", ck, "--labels",
                               os.path.join(set_dir, "labels.csv"), "--out-dir", os.path.join(tmp, "ev")],
                              capture_output=True, text=True, cwd=tmp)
         assert out.returncode == 0, out.stderr[-3000:]
         with open(os.path.join(tmp, "ev", "eval_frames.csv")) as f:
-            assert "touches_tail" in next(csv.reader(f))
+            assert "covered_by_tail" in next(csv.reader(f))
     finally:
         shutil.rmtree(tmp)
 

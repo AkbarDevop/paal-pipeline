@@ -41,7 +41,7 @@ from select_frames import parse_windows, relocate, select  # noqa: E402
 
 FRAME_FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "posture_confidence",
                 "vulva_visible", "vulva_prob", "vulva_conf", "mask_area_px"] + MEASURE_FIELDS + \
-               ["blob_status", "touches_tail", "ir_path", "mask_path"]
+               ["blob_status", "covered_by_tail", "ir_path", "mask_path"]
 
 
 def write_csv(rows, path, fields=None):
@@ -154,12 +154,12 @@ def main():
                 rows.append(row)
                 continue
             d = res_by[j]
-            mask, prob, area, conf, tail_touch = d["vulva"], d["pmax"], d["area"], d["conf"], d["touches_tail"]
+            mask, prob, area, conf, tail_touch = d["vulva"], d["pmax"], d["area"], d["conf"], d["covered_by_tail"]
             m = measure(load_depth_raw(c["depth_path"]), mask, K) if mask.any() else None
             measured = m is not None and m["measure_status"] == "ok"
             kept = (m is not None and not tail_touch
                     and keep_blob(conf, m["peak_height_mm"] if measured else None, measured, rule))
-            row["touches_tail"] = int(tail_touch)
+            row["covered_by_tail"] = int(tail_touch)
             row.update({"vulva_visible": int(kept), "vulva_prob": round(prob, 4),
                         "vulva_conf": round(conf, 4), "mask_area_px": area})
             if m is not None:

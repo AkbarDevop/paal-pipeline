@@ -15,9 +15,12 @@ r"""Train the vulva segmentation U-Net, with cross-validation grouped by sow.
 --classes 3 trains background / vulva / tail (tail outlines from label_tail.py, read from
 tail_labels.csv next to each labels CSV). Frames whose tail was never outlined still teach
 vulva versus not-vulva: for them tail and background are one class in the loss, so a set can
-be tail-labelled in part. The vulva is the pixels where vulva wins (no threshold to tune), and
-a vulva that touches a tail is reported separately (partly covered). No confidence cut by
-default for 3 classes (--presence-precision 0); the CV report shows what one would do.
+be tail-labelled in part. The vulva is the pixels where its probability is the majority
+(>= 0.5), and a vulva the tail cuts into (tail in >= 10% of its fitted ellipse) is reported as
+partly covered. No confidence cut by default for 3 classes (--presence-precision 0).
+
+--rescore recomputes the CV report of a finished --jobs run from <out-dir>/jobs (the held-out
+predictions are kept there), e.g. after the post-processing rules changed, without training.
 
 Usage:
     python vulva/train_seg.py --labels labels/vulva_seg_labels.csv
@@ -51,7 +54,7 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, blob_confidence, parts_from_probs,  # noqa: E402
-                       read_input, read_mask, save_checkpoint, to_model_space, to_tensor, touches)
+                       read_input, read_mask, save_checkpoint, to_model_space, to_tensor, covered_by_tail)
 from select_frames import index_folders  # noqa: E402
 
 MIN_AREA = 25    # model pixels; smaller blobs count as "no vulva"
@@ -402,6 +405,8 @@ def main():
     ap.add_argument("--job-dir", default="", help=argparse.SUPPRESS)
     ap.add_argument("--items-cache", default="", help=argparse.SUPPRESS)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--rescore", action="store_true",
+                    help="no training: recompute the CV report from <out-dir>/jobs of a finished --jobs run")
     args = ap.parse_args()
     if args.presence_precision is None:
         args.presence_precision = 0.0 if args.classes == 3 else 0.9
@@ -410,6 +415,8 @@ def main():
     args.frames_roots = [r for r in args.frames_root.split(";") if r.strip()]
     if args.job is not None:
         return run_job(args)
+    if args.rescore:
+        return rescore(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -486,6 +493,37 @@ def main():
     if args.copy_to:
         copy_results(args.out_model, args.out_dir, args.copy_to)
 
+
+
+def rescore(args):
+    """CV report from the held-out predictions a finished --jobs run left in <out-dir>/jobs."""
+    job_dir = os.path.join(args.out_dir, "jobs")
+    cache = os.path.join(job_dir, "items.npz")
+    if not os.path.exists(cache):
+        sys.exit(f"No {cache}: --rescore needs a run made with --jobs 2 or more")
+    items = load_items(cache)
+    folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
+    where = {it["row"]["ir_path"]: i for i, it in enumerate(items)}
+    oof = [None] * len(items)
+    for k in range(args.folds):
+        d = np.load(os.path.join(job_dir, f"fold{k}.npz"))
+        for key, pr in zip(d["keys"], d["probs"]):
+            if key in where:
+                oof[where[key]] = pr
+    if any(p is None for p in oof):
+        sys.exit("Some frames have no held-out prediction in the jobs folder")
+    if args.classes == 2 and oof[0].ndim == 3:
+        args.classes = 3
+    lines = []
+
+    def log(s):
+        print(s, flush=True)
+        lines.append(s)
+    log(f"Re-scored {len(items)} frames from {job_dir} (classes {args.classes})")
+    report = {"rescored": True}
+    finish_cv(args, items, folds, oof, [], report, log)
+    with open(os.path.join(args.out_dir, "seg_report_rescored.txt"), "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def run_job(args):
@@ -596,7 +634,7 @@ def finish_cv(args, items, folds, oof_probs, per_fold, report, log):
     (a vulva touching a tail is partly covered and dropped) and how well tails are found."""
     three = args.classes == 3
     if three:
-        threshold, by_thr = 0.5, []
+        threshold, by_thr = 0.5, []                 # vulva where its probability is the majority
         oof = masks_from_probs(oof_probs, threshold)
         overall = score(items, oof)
     else:
@@ -637,13 +675,13 @@ def finish_cv(args, items, folds, oof_probs, per_fold, report, log):
     tails, touch = [None] * len(items), [False] * len(items)
     if three:
         tails = tails_from_probs(oof_probs)
-        touch = [touches(m, t) for m, t in zip(kept, tails)]
+        touch = [covered_by_tail(m, t) for m, t in zip(kept, tails)]
         kept_t = [np.zeros_like(m) if tc else m for m, tc in zip(kept, touch)]
         st = score(items, kept_t)
         c = st["confusion"]
         spec = c["tn"] / max(c["tn"] + c["fp"], 1)
         report["cv"]["tail_rule"] = st
-        log("With the tail rule (a vulva touching a tail is partly covered: dropped; used by run_vulva):")
+        log("With the tail rule (a vulva the tail cuts into is partly covered: dropped; used by run_vulva):")
         log(f"  Vulva visible: precision {st['presence_precision']}, recall {st['presence_recall']}, "
             f"specificity {spec:.3f}, F1 {st['presence_f1']}")
         log(f"  Confusion (rows true present/absent): [[{c['tp']}, {c['fn']}], [{c['fp']}, {c['tn']}]]")
@@ -668,7 +706,7 @@ def finish_cv(args, items, folds, oof_probs, per_fold, report, log):
         # pred_area_px / iou are before the confidence cut; peak_prob and blob_conf let it be re-tuned
         w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "label", "how", "fold",
                     "pred_area_px", "true_area_px", "iou", "peak_prob", "blob_conf",
-                    "tail_known", "tail_true_px", "tail_pred_px", "touches_tail"])
+                    "tail_known", "tail_true_px", "tail_pred_px", "covered_by_tail"])
         for it, p, pk, cf, tl, tc in zip(items, oof, peaks, confs, tails, touch):
             r = it["row"]
             t, q = it["mask"] == 1, p.astype(bool)

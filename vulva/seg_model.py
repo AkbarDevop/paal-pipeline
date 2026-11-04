@@ -206,7 +206,7 @@ def blob_confidence(prob, mask):
 
 
 MIN_TAIL_AREA = 40      # model pixels; smaller tail specks are ignored
-TAIL_GAP = 3            # model pixels: a tail this close to the vulva blob counts as touching it
+TAIL_COVER = 0.10       # a vulva is "covered" when the tail fills this share of the ellipse fitted to it
 
 
 def parts_from_probs(p, threshold=0.5, min_area=None):
@@ -214,8 +214,9 @@ def parts_from_probs(p, threshold=0.5, min_area=None):
     the minimum-area check), model space.
     p: H x W vulva probability (1-channel models) or 3 x H x W softmax (bg, vulva, tail)."""
     if p.ndim == 3:
+        # vulva only where it has the majority (p >= threshold, 0.5), stricter than "wins among three"
         lab = p.argmax(0)
-        vul, pv = (lab == 1).astype(np.uint8), p[1]
+        vul, pv = (p[1] >= threshold).astype(np.uint8), p[1]
         tail = (lab == 2).astype(np.uint8)
         n, cc, st, _ = cv2.connectedComponentsWithStats(tail, connectivity=8)
         keep = [k for k in range(1, n) if st[k, cv2.CC_STAT_AREA] >= MIN_TAIL_AREA]
@@ -229,18 +230,28 @@ def parts_from_probs(p, threshold=0.5, min_area=None):
     return vul, pv, tail, area
 
 
-def touches(vulva, tail, gap=TAIL_GAP):
+def covered_by_tail(vulva, tail, share=TAIL_COVER):
+    """True when the tail cuts into the vulva: tail pixels fill at least `share` of the ellipse
+    fitted to the vulva blob. A tail merely hanging next to it (the tail root sits right above the
+    vulva, so that is normal) does not count."""
     if tail is None or not vulva.any() or not tail.any():
         return False
-    k = np.ones((2 * gap + 1, 2 * gap + 1), np.uint8)
-    return bool((cv2.dilate(vulva, k) & tail).any())
+    cnts, _ = cv2.findContours(vulva.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    c = max(cnts, key=cv2.contourArea)
+    ell = np.zeros_like(vulva, np.uint8)
+    if len(c) >= 5:
+        cv2.ellipse(ell, cv2.fitEllipse(c), 1, -1)
+    else:
+        cv2.drawContours(ell, [cv2.convexHull(c)], -1, 1, -1)
+    n = int(ell.sum())
+    return bool(n and (ell & (tail > 0)).sum() >= share * n)
 
 
 @torch.no_grad()
 def predict_parts(model, grays, device="cpu", threshold=0.5, min_area=None, batch_size=16, presence=0.0):
     """Full-frame inputs -> one dict per frame: vulva (full-frame mask, emptied below the
-    confidence cut), tail (full-frame mask, 3-class models only, else None), touches_tail
-    (the vulva blob touches a tail: partly covered, so its size is not trusted), pmax, area,
+    confidence cut), tail (full-frame mask, 3-class models only, else None), covered_by_tail
+    (the tail cuts into the vulva: partly covered, so its size is not trusted), pmax, area,
     conf (mean vulva probability in the blob)."""
     out = []
     n_out = getattr(model, "n_out", 1)
@@ -255,7 +266,7 @@ def predict_parts(model, grays, device="cpu", threshold=0.5, min_area=None, batc
             if conf < presence:
                 vul[:] = 0
             out.append({"vulva": to_full_frame(vul), "tail": to_full_frame(tail) if tail is not None else None,
-                        "touches_tail": touches(vul, tail), "pmax": float(pv.max()), "area": area, "conf": conf})
+                        "covered_by_tail": covered_by_tail(vul, tail), "pmax": float(pv.max()), "area": area, "conf": conf})
     return out
 
 

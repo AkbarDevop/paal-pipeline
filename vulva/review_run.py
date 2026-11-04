@@ -19,7 +19,7 @@ again on just those frames and writes, under --out-dir:
                                  or: python vulva/view_pointcloud.py <file>.ply
 
 Which frames (--which): ok = measured, low_confidence = outline dropped by the confidence
-check, tail_covered = vulva touching a tail (3-class models), not_visible = no outline, all. The colour image is a separate camera matched onto the
+check, tail_covered = vulva the tail cuts into (3-class models), not_visible = no outline, all. The colour image is a separate camera matched onto the
 IR (rgb_align.py); the model itself only sees the IR image.
 
 Usage:
@@ -234,7 +234,7 @@ def main():
         else:
             cx, cy = 310, 255
         half = HALF if has else WIDE
-        col = (0, 215, 255) if has and conf >= cut and not d["touches_tail"] else (0, 140, 255)
+        col = (0, 215, 255) if has and conf >= cut and not d["covered_by_tail"] else (0, 140, 255)
         depth = load_depth_raw(dpath)
         rgb = colour_for(ir_path, gray, (cx, cy) if has else None)
         tiles = []

@@ -48,8 +48,8 @@ FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "note", "how",
           "model_visible_before_cut", "blob_conf", "iou", "human_width_mm", "model_width_mm",
           "human_length_mm", "model_length_mm", "human_peak_height_mm", "model_peak_height_mm",
           "model_mean_height_mm", "model_area_mm2", "model_distance_mm", "human_status", "model_status",
-          "touches_tail", "model_tail_px", "ir_path"]
-ORDER = {"false alarm": 0, "missed": 1, "dropped by cut": 2, "dropped (touches tail)": 2, "both visible": 3,
+          "covered_by_tail", "model_tail_px", "ir_path"]
+ORDER = {"false alarm": 0, "missed": 1, "dropped by cut": 2, "dropped (covered by tail)": 2, "both visible": 3,
          "both not visible": 4}
 
 
@@ -92,7 +92,7 @@ def evaluate(model, ckpt, rows, device, K=None):
         if r["label"] == "present" and (human is None or not human.any()):
             continue
         d = predict_parts(model, [img], device, thr, min_area)[0]
-        mask, conf, tail_touch = d["vulva"], d["conf"], d["touches_tail"]
+        mask, conf, tail_touch = d["vulva"], d["conf"], d["covered_by_tail"]
         before = bool(mask.any())
         truth = r["label"] == "present"
         depth = load_depth_raw(r["depth_path"]) if os.path.exists(r["depth_path"]) else None
@@ -102,7 +102,7 @@ def evaluate(model, ckpt, rows, device, K=None):
         visible = (before and not tail_touch
                    and keep(conf, mm.get("peak_height_mm") if measured else None, measured, rule))
         verdict = ("both visible" if truth and visible else
-                   ("dropped (touches tail)" if tail_touch else "dropped by cut") if truth and before else
+                   ("dropped (covered by tail)" if tail_touch else "dropped by cut") if truth and before else
                    "missed" if truth else "false alarm" if visible else "both not visible")
         iou = ""
         if truth and before:
@@ -118,7 +118,7 @@ def evaluate(model, ckpt, rows, device, K=None):
                     "human_peak_height_mm": hm.get("peak_height_mm", ""),
                     "model_peak_height_mm": mm.get("peak_height_mm", ""),
                     "model_mean_height_mm": mm.get("mean_height_mm", ""), "model_area_mm2": mm.get("area_mm2", ""),
-                    "model_distance_mm": mm.get("distance_mm", ""), "touches_tail": int(tail_touch),
+                    "model_distance_mm": mm.get("distance_mm", ""), "covered_by_tail": int(tail_touch),
                     "model_tail_px": int(d["tail"].sum()) if d["tail"] is not None else "",
                     "human_status": hm.get("measure_status", ""), "model_status": mm.get("measure_status", ""),
                     "ir_path": r["ir_path"], "_ir": ir_channel(img), "_human": human, "_model": mask,
@@ -160,8 +160,8 @@ def summarise(frames, rule):
              f"{sum(f['label'] == 'absent' for f in frames)} without"]
     how = (f"conf >= {rule['conf_high']}, or conf >= {rule['conf_low']} and bump >= {rule['min_peak_mm']} mm"
            if rule["conf_low"] < rule["conf_high"] else f"confidence cut {rule['conf_high']}")
-    if any(f.get("touches_tail") for f in frames) or any(f.get("model_tail_px") not in ("", None) for f in frames):
-        how += ", and not touching a tail"
+    if any(f.get("covered_by_tail") for f in frames) or any(f.get("model_tail_px") not in ("", None) for f in frames):
+        how += ", and not covered by a tail"
     for name, key in ((f"Kept ({how}, as run_vulva.py decides)", "model_visible"),
                       ("Before the cut", "model_visible_before_cut")):
         tp, fn, fp, tn, p, r, s, f1 = conf_at(key)
@@ -169,9 +169,9 @@ def summarise(frames, rule):
                   f"  vulva visible: precision {p:.3f}, recall {r:.3f}, specificity {s:.3f}, F1 {f1:.3f}",
                   f"  confusion (rows true present/absent): [[{tp}, {fn}], [{fp}, {tn}]]"]
     both = [f for f in frames if f["verdict"] == "both visible"]
-    tt = sum(1 for f in frames if f["verdict"] == "dropped (touches tail)")
+    tt = sum(1 for f in frames if f["verdict"] == "dropped (covered by tail)")
     if tt:
-        lines.append(f"Vulvas dropped because the model drew a tail touching them: {tt}")
+        lines.append(f"Vulvas dropped because the model drew a tail cutting into them: {tt}")
     ious = [f["iou"] for f in both if f["iou"] != ""]
     if ious:
         lines.append(f"Outline on frames both call visible ({len(ious)}): IoU mean {np.mean(ious):.3f}, "

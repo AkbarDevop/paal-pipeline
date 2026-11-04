@@ -31,7 +31,7 @@ python vulva/pick_hard_frames.py <run>/vulva_frames.csv --model <ckpt> --hold-ou
 python vulva/retune_cut.py <run>/cv_predictions.csv --model <ckpt> --exclude-labels <hand-picked labels.csv> --write <ckpt copy>   # re-set the confidence cut
 python vulva/label_tail.py <set>/labels.csv [--frames-root <raw>]   # outline tails (strokes / polygon / brush) -> tail_labels.csv
 python vulva/train_seg.py --labels <sets>/labels.csv --classes 3   # background / vulva / tail
-python tests/test_vulva_pipeline.py                                  # 29 synthetic checks
+python tests/test_vulva_pipeline.py                                  # 30 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)
