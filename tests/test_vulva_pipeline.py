@@ -10,6 +10,7 @@ whole train -> run path on a tiny dataset.
 """
 
 import csv
+import json
 from collections import Counter
 import os
 import shutil
@@ -1166,6 +1167,91 @@ def test_label_tail_gui_smoke():
         tm = cv2.imread(os.path.join(set_dir, r1["tail_mask_path"]), 0)
         assert tm[140, 310] == 255 and tm[320, 270] == 255 and tm[200, 325] == 0     # stroke, polygon, erased
         assert done[rows[0]["ir_path"]]["tail"] == "0"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_agreement_set_cvat_round_trip_and_compare():
+    """make_agreement_set.py pictures -> a CVAT 'for images 1.1' export drawn on them -> import_cvat.py
+    puts the ellipses back on the IR grid -> compare_labels.py: the same ellipses agree perfectly,
+    shifted ones less; tags become not visible / tail."""
+    import zipfile as _zip
+    from compare_labels import compare, load
+    from import_cvat import import_export
+    from label_ellipse import ellipse_mask
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(4)
+        set_dir = os.path.join(tmp, "test_set")
+        os.makedirs(os.path.join(set_dir, "masks"))
+        rows = []
+        for k in range(10):
+            folder_name = f"20260213-09-{k:02d}-00"
+            os.makedirs(os.path.join(set_dir, folder_name))
+            pid, ts = k % 5, f"20260213-09-{k:02d}-10"
+            present = k < 7
+            _write_frame(os.path.join(set_dir, folder_name), pid, ts, present, rng)
+            row = {"ir_path": f"{folder_name}/pig{pid}_ir_vis_{ts}.jpg", "mask_path": "",
+                   "label": "present" if present else "absent", "pig_id": pid, "timestamp_folder": folder_name,
+                   "pig_timestamp": ts, "cx": "", "cy": "", "half_length_px": "", "half_width_px": "",
+                   "angle_deg": "", "note": "tail" if k == 9 else ""}
+            if present:
+                params = (300 + 3 * k, 250 + 2 * k, 26.0, 13.0, 80.0 + k)
+                mp = f"masks/{k}.png"
+                cv2.imwrite(os.path.join(set_dir, mp), ellipse_mask(params))
+                row.update(mask_path=mp, cx=params[0], cy=params[1], half_length_px=params[2],
+                           half_width_px=params[3], angle_deg=params[4])
+            rows.append(row)
+        ref = os.path.join(set_dir, "labels.csv")
+        with open(ref, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        agr = os.path.join(tmp, "agreement")
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "make_agreement_set.py"), ref, agr, "--n", "8",
+                              "--absent", "2"], capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-3000:]
+        with open(os.path.join(agr, "manifest.csv")) as f:
+            man = list(csv.DictReader(f))
+        assert len(man) == 8 and len(os.listdir(os.path.join(agr, "images"))) == 8
+        img = cv2.imread(os.path.join(agr, "images", man[0]["image"]))
+        assert img.shape == (900, 1520, 3)
+        assert {"vulva", "not_visible", "tail_covers"} <= {d["name"] for d in json.load(open(os.path.join(agr, "cvat_labels.json")))}
+        by_ts = {r["pig_timestamp"]: r for r in rows}
+
+        def export(path, shift=0.0, empty_one=False):
+            parts = ['<?xml version="1.0" encoding="utf-8"?><annotations><version>1.1</version>']
+            for i, m in enumerate(man):
+                r = by_ts[m["pig_timestamp"]]
+                parts.append(f'<image id="{i}" name="{m["image"]}" width="1520" height="900">')
+                if r["label"] == "present":
+                    hw = 760 if i % 2 else 0                    # draw on the IR half for every other picture
+                    cx = (float(r["cx"]) + shift - 120) * 2 + hw
+                    cy = (float(r["cy"]) - 30) * 2
+                    parts.append(f'<ellipse label="vulva" source="manual" occluded="0" cx="{cx}" cy="{cy}" '
+                                 f'rx="{float(r["half_length_px"]) * 2}" ry="{float(r["half_width_px"]) * 2}" '
+                                 f'rotation="{r["angle_deg"]}" z_order="0"></ellipse>')
+                elif not (empty_one and i == len(man) - 1):
+                    lab = "tail_covers" if r["note"] == "tail" else "not_visible"
+                    parts.append(f'<tag label="{lab}" source="manual"></tag>')
+                parts.append("</image>")
+            parts.append("</annotations>")
+            with _zip.ZipFile(path, "w") as z:
+                z.writestr("annotations.xml", "".join(parts))
+        export(os.path.join(tmp, "same.zip"))
+        export(os.path.join(tmp, "shifted.zip"), shift=8.0)
+        _, got, unknown, empty, on_colour = import_export(os.path.join(tmp, "same.zip"), agr, "same")
+        assert len(got) == 8 and unknown == 0 and empty == 0
+        sides = [r["how"].rsplit(":", 1)[1] for r in got if r["label"] == "present"]
+        assert on_colour == sides.count("colour") and "ir" in sides and "colour" in sides, sides
+        import_export(os.path.join(tmp, "shifted.zip"), agr, "shifted")
+        keep = {(str(int(m["pig_id"])), m["pig_timestamp"]) for m in man}
+        a = load(ref, keep=keep)
+        s_same = compare(a, load(os.path.join(agr, "labels_same.csv"), keep=keep))
+        s_shift = compare(a, load(os.path.join(agr, "labels_shifted.csv"), keep=keep))
+        assert s_same["frames"] == 8 and s_same["agree"] == 1.0 and min(s_same["ious"]) > 0.95, s_same["ious"]
+        assert s_same["map5095"] > 0.95 and s_same["tail_agree"] == 1.0
+        assert 0.4 < np.mean(s_shift["ious"]) < 0.8 and s_shift["map5095"] < s_same["map5095"]
     finally:
         shutil.rmtree(tmp)
 
