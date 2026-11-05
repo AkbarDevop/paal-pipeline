@@ -63,7 +63,8 @@ Only one oval per picture. If you are not sure, make your best guess: we want yo
 - Open **Jobs** (top menu) and click your job. `F` goes to the next picture, `D` to the previous one
   (or use the arrows at the top). The picture number is shown at the top.
 - **Draw an oval:** on the left toolbar click the **ellipse** icon (an oval). Label `vulva`, drawing method
-  **2 Points**, click **Shape**. Then click once at the top-left corner of the vulva and once at its
+  **2 Points**, then click **Shape** (not Track: a track stays on every later picture). Then click
+  once at the top-left corner of the vulva and once at its
   bottom-right corner: the oval fills the box between the two clicks. If the vulva is clearly tilted,
   choose drawing method **Rotated** instead and click 5 or more points around its edge, then press `N`.
 - **Add a tag:** on the left toolbar click the **tag** icon (the luggage-label shape just below the

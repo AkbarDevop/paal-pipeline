@@ -1174,7 +1174,8 @@ def test_label_tail_gui_smoke():
 def test_agreement_set_cvat_round_trip_and_compare():
     """make_agreement_set.py pictures -> a CVAT 'for images 1.1' export drawn on them -> import_cvat.py
     puts the ellipses back on the IR grid -> compare_labels.py: the same ellipses agree perfectly,
-    shifted ones less; tags become not visible / tail."""
+    shifted ones less; tags become not visible / tail; an oval drawn as a "Track" (copied by CVAT
+    onto every later picture) is dropped on the copies."""
     import zipfile as _zip
     from compare_labels import compare, load
     from import_cvat import import_export
@@ -1219,11 +1220,14 @@ def test_agreement_set_cvat_round_trip_and_compare():
         assert {"vulva", "not_visible", "tail_covers"} <= {d["name"] for d in json.load(open(os.path.join(agr, "cvat_labels.json")))}
         by_ts = {r["pig_timestamp"]: r for r in rows}
 
-        def export(path, shift=0.0, empty_one=False):
+        def export(path, shift=0.0, empty_one=False, track=False):
             parts = ['<?xml version="1.0" encoding="utf-8"?><annotations><version>1.1</version>']
+            copy = None
             for i, m in enumerate(man):
                 r = by_ts[m["pig_timestamp"]]
-                parts.append(f'<image id="{i}" name="{m["image"]}" width="1520" height="900">')
+                parts.append(f'<image id="{i}" name="images/{m["image"]}" width="1520" height="900">')
+                if copy:                                    # a "Track" drawn earlier, copied on by CVAT
+                    parts.append(copy)
                 if r["label"] == "present":
                     hw = 760 if i % 2 else 0                    # draw on the IR half for every other picture
                     cx = (float(r["cx"]) + shift - 120) * 2 + hw
@@ -1231,6 +1235,8 @@ def test_agreement_set_cvat_round_trip_and_compare():
                     parts.append(f'<ellipse label="vulva" source="manual" occluded="0" cx="{cx}" cy="{cy}" '
                                  f'rx="{float(r["half_length_px"]) * 2}" ry="{float(r["half_width_px"]) * 2}" '
                                  f'rotation="{r["angle_deg"]}" z_order="0"></ellipse>')
+                    if track and copy is None:
+                        copy = parts[-1]
                 elif not (empty_one and i == len(man) - 1):
                     lab = "tail_covers" if r["note"] == "tail" else "not_visible"
                     parts.append(f'<tag label="{lab}" source="manual"></tag>')
@@ -1240,11 +1246,16 @@ def test_agreement_set_cvat_round_trip_and_compare():
                 z.writestr("annotations.xml", "".join(parts))
         export(os.path.join(tmp, "same.zip"))
         export(os.path.join(tmp, "shifted.zip"), shift=8.0)
-        _, got, unknown, empty, on_colour = import_export(os.path.join(tmp, "same.zip"), agr, "same")
-        assert len(got) == 8 and unknown == 0 and empty == 0
+        export(os.path.join(tmp, "track.zip"), track=True)
+        _, got, unknown, empty, on_colour, carried = import_export(os.path.join(tmp, "same.zip"), agr, "same")
+        assert len(got) == 8 and unknown == 0 and empty == 0 and carried == 0
         sides = [r["how"].rsplit(":", 1)[1] for r in got if r["label"] == "present"]
         assert on_colour == sides.count("colour") and "ir" in sides and "colour" in sides, sides
         import_export(os.path.join(tmp, "shifted.zip"), agr, "shifted")
+        _, got_t, _, _, _, carried = import_export(os.path.join(tmp, "track.zip"), agr, "track")
+        first = next(i for i, m in enumerate(man) if by_ts[m["pig_timestamp"]]["label"] == "present")
+        assert carried == len(man) - first - 1, carried       # every copy after the Track's own picture
+        assert [(r["label"], r.get("cx")) for r in got_t] == [(r["label"], r.get("cx")) for r in got]
         keep = {(str(int(m["pig_id"])), m["pig_timestamp"]) for m in man}
         a = load(ref, keep=keep)
         s_same = compare(a, load(os.path.join(agr, "labels_same.csv"), keep=keep))

@@ -10,7 +10,9 @@ In CVAT: open the task -> Actions -> Export task dataset -> format "CVAT for ima
 
 Writes <set>/labels_<who>.csv and <set>/masks_<who>/*.png. A picture with an ellipse labelled
 "vulva" is "present" (the largest ellipse if there are several); tag "tail_covers" makes it
-"absent" with note "tail"; tag "not_visible" makes it "absent"; a picture with nothing is left out
+"absent" with note "tail"; tag "not_visible" makes it "absent" (a tag wins over an oval on the same
+picture); an oval identical to the previous picture's is a "Track" copy and is dropped (see
+drop_carried_over); a picture with nothing is left out
 (not labelled). The "how" column says which side the oval was drawn on (cvat:<who>:ir or :colour).
 """
 
@@ -62,6 +64,23 @@ def parse_images(root):
     return out
 
 
+def drop_carried_over(images):
+    """An oval drawn with "Track" instead of "Shape" (a video tool) follows on to every later
+    picture, and the "CVAT for images" export writes the copies as ordinary ovals, unchanged
+    until the next picture where it was edited. A vulva on a different sow never lands on exactly
+    the same pixels, so an oval identical to one on the previous picture is a copy: drop it.
+    Returns how many were dropped."""
+    prev, dropped = set(), 0
+    for name in sorted(images):
+        rec = images[name]
+        keys = [tuple(round(v, 2) for v in e) for e in rec["ellipses"]]
+        keep = [e for e, k in zip(rec["ellipses"], keys) if k not in prev]
+        dropped += len(rec["ellipses"]) - len(keep)
+        prev = set(keys)
+        rec["ellipses"] = keep
+    return dropped
+
+
 def to_ir_grid(ell, crop_x, crop_y, scale, half_width):
     """Ellipse drawn on the side-by-side picture -> the same ellipse on the 640 x 480 IR grid
     (either half: colour on the left, IR on the right, both the same crop and enlargement)."""
@@ -82,6 +101,7 @@ def import_export(export_path, set_dir, who):
     with open(os.path.join(set_dir, "manifest.csv"), newline="", encoding="utf-8-sig") as f:
         manifest = {r["image"]: r for r in csv.DictReader(f)}
     images = parse_images(read_xml(export_path))
+    carried = drop_carried_over(images)
     mask_dir = os.path.join(set_dir, f"masks_{who}")
     os.makedirs(mask_dir, exist_ok=True)
     rows, unknown, empty, on_colour = [], 0, 0, 0
@@ -92,7 +112,11 @@ def import_export(export_path, set_dir, who):
             continue
         base = {"ir_path": m["ir_path"], "pig_id": m["pig_id"], "timestamp_folder": m.get("timestamp_folder", ""),
                 "pig_timestamp": m["pig_timestamp"], "how": f"cvat:{who}", "mask_path": "", "note": "", "review": ""}
-        if rec["ellipses"]:
+        if "tail_covers" in rec["tags"]:
+            rows.append(dict(base, label="absent", note="tail"))
+        elif "not_visible" in rec["tags"]:
+            rows.append(dict(base, label="absent"))
+        elif rec["ellipses"]:
             e = max(rec["ellipses"], key=lambda t: t[2] * t[3])
             cx, cy, rx, ry, rot = to_ir_grid(e, float(m["crop_x"]), float(m["crop_y"]), float(m["scale"]),
                                              float(m["half_width"]))
@@ -106,10 +130,6 @@ def import_export(export_path, set_dir, who):
                              how=f"cvat:{who}:{side}",
                              half_length_px=round(a, 2), half_width_px=round(b, 2),
                              angle_deg=round(math.fmod(ang, 360), 1)))
-        elif "tail_covers" in rec["tags"]:
-            rows.append(dict(base, label="absent", note="tail"))
-        elif "not_visible" in rec["tags"]:
-            rows.append(dict(base, label="absent"))
         else:
             empty += 1
     out = os.path.join(set_dir, f"labels_{who}.csv")
@@ -117,7 +137,7 @@ def import_export(export_path, set_dir, who):
         w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
-    return out, rows, unknown, empty, on_colour
+    return out, rows, unknown, empty, on_colour, carried
 
 
 def main():
@@ -126,11 +146,14 @@ def main():
     ap.add_argument("set_dir", help="the folder from make_agreement_set.py (has manifest.csv)")
     ap.add_argument("--who", required=True, help="annotator name, used in the file names (e.g. lucas)")
     args = ap.parse_args()
-    out, rows, unknown, empty, on_colour = import_export(args.export, args.set_dir, args.who.lower())
+    out, rows, unknown, empty, on_colour, carried = import_export(args.export, args.set_dir, args.who.lower())
     pres = sum(1 for r in rows if r["label"] == "present")
     tail = sum(1 for r in rows if r.get("note") == "tail")
     print(f"{args.who}: {len(rows)} pictures labelled ({pres} vulva outlined, {tail} tail covers, "
           f"{len(rows) - pres - tail} not visible); {empty} left empty; {unknown} not in the manifest -> {out}")
+    if carried:
+        print(f"Warning: {carried} ovals were exact copies of the oval on the previous picture (drawn with "
+              f"'Track' instead of 'Shape') and were dropped. Check those pictures in CVAT.")
     if on_colour:
         print(f"Note: {on_colour} ovals were drawn on the colour side; they are mapped over, but the colour "
               f"image can sit a few pixels off the IR one, so those outlines may be slightly shifted")
