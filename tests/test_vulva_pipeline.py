@@ -706,6 +706,7 @@ def test_eval_seg_scores_a_model_end_to_end():
         assert abs(float(frames[0]["human_width_mm"]) - 40) < 8          # hand mask measured on the depth
         report = summarise(frames, {"conf_high": 0.0, "conf_low": 0.0, "min_peak_mm": 0.0})
         assert report[0].startswith("4 labelled frames: 3 with a visible vulva, 1 without")
+        assert report[1].startswith("Mask mAP50 ")
         from seg_model import save_checkpoint
         ck = os.path.join(tmp, "m.pth")
         save_checkpoint(model, ck, ckpt)
@@ -719,6 +720,22 @@ def test_eval_seg_scores_a_model_end_to_end():
     finally:
         shutil.rmtree(tmp)
 
+
+def test_mask_map_coco_style():
+    """eval_seg.py mAP: perfect masks give 1.0; a false outline ranked first costs precision;
+    outlines that overlap by IoU 0.72 count up to the 0.70 threshold only (mAP50-95 = 0.5)."""
+    from eval_seg import map_scores
+    fr = [{"label": "present", "model_visible_before_cut": 1, "blob_conf": 0.9 + 0.01 * i, "iou": 0.97}
+          for i in range(4)]
+    fr += [{"label": "absent", "model_visible_before_cut": 0, "blob_conf": 0, "iou": ""} for _ in range(2)]
+    assert map_scores(fr)[:2] == (1.0, 1.0)
+    fa = fr + [{"label": "absent", "model_visible_before_cut": 1, "blob_conf": 0.999, "iou": ""}]
+    assert abs(map_scores(fa)[1] - 0.8) < 1e-6
+    loose = [dict(f, iou=0.72) if f["label"] == "present" else f for f in fr]
+    m50, m5095, by_t = map_scores(loose)
+    assert m50 == 1.0 and abs(m5095 - 0.5) < 1e-9 and by_t[0.75] == 0.0
+    missed = fr[:2] + [dict(f, model_visible_before_cut=0, iou="") for f in fr[2:4]] + fr[4:]
+    assert abs(map_scores(missed)[1] - 51 / 101) < 1e-9          # half the vulvas never drawn: recall stops at 0.5
 
 def test_keep_rule_bump_check_tunes_applies_and_saves():
     """keep_rule.py: a fairly sure blob on a bump is kept, a fairly sure flat one is not; the rule is

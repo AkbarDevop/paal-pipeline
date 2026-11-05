@@ -146,6 +146,40 @@ def colour_view(f):
     return None
 
 
+IOU_THRESHOLDS = [round(0.5 + 0.05 * k, 2) for k in range(10)]      # 0.50, 0.55, ..., 0.95 (COCO)
+
+
+def mask_ap(frames, thr):
+    """COCO-style average precision of the vulva masks at one IoU threshold. Every outline the model
+    drew (before any keep decision) is a detection scored by its blob confidence; a detection is right
+    when the frame has a hand outline and the two overlap by IoU >= thr (one vulva per frame, so at most
+    one match). Precision is interpolated at 101 recall points, as in the COCO evaluation."""
+    n_gt = sum(1 for f in frames if f["label"] == "present")
+    dets = sorted((f for f in frames if f["model_visible_before_cut"]), key=lambda f: -float(f["blob_conf"]))
+    if not n_gt:
+        return float("nan")
+    tp = fp = 0
+    prec, rec = [], []
+    for f in dets:
+        ok = f["label"] == "present" and f["iou"] != "" and float(f["iou"]) >= thr
+        tp, fp = tp + ok, fp + (not ok)
+        prec.append(tp / (tp + fp))
+        rec.append(tp / n_gt)
+    for i in range(len(prec) - 2, -1, -1):          # precision envelope (non-increasing)
+        prec[i] = max(prec[i], prec[i + 1])
+    total = 0.0
+    for r in np.linspace(0, 1, 101):
+        p = [pv for pv, rv in zip(prec, rec) if rv >= r - 1e-12]
+        total += p[0] if p else 0.0
+    return total / 101
+
+
+def map_scores(frames):
+    """mAP50 and mAP50-95 (mean over IoU 0.50:0.05:0.95) of the vulva masks."""
+    aps = [mask_ap(frames, t) for t in IOU_THRESHOLDS]
+    return aps[0], float(np.mean(aps)), dict(zip(IOU_THRESHOLDS, aps))
+
+
 def summarise(frames, rule):
     def conf_at(key):
         tp = sum(1 for f in frames if f["label"] == "present" and f[key])
@@ -158,6 +192,9 @@ def summarise(frames, rule):
 
     lines = [f"{len(frames)} labelled frames: {sum(f['label'] == 'present' for f in frames)} with a visible vulva, "
              f"{sum(f['label'] == 'absent' for f in frames)} without"]
+    m50, m5095, by_t = map_scores(frames)
+    lines.append(f"Mask mAP50 {m50:.3f}, mAP50-95 {m5095:.3f}  (every outline drawn, ranked by confidence; "
+                 f"AP at IoU 0.75 {by_t[0.75]:.3f}, at 0.90 {by_t[0.9]:.3f})")
     how = (f"conf >= {rule['conf_high']}, or conf >= {rule['conf_low']} and bump >= {rule['min_peak_mm']} mm"
            if rule["conf_low"] < rule["conf_high"] else f"confidence cut {rule['conf_high']}")
     if any(f.get("covered_by_tail") for f in frames) or any(f.get("model_tail_px") not in ("", None) for f in frames):
