@@ -47,7 +47,7 @@ HOW_TO = """# How to outline the vulva (about 30 minutes for 50 pictures)
 
 Each picture shows the same moment twice: **colour on the left, infrared (black and white) on the right**.
 **Always draw on the right (infrared) side.** Look at the colour side to see what is what, but draw
-the oval on the infrared one (the two sides are not lined up perfectly). At night the colour side is dark.
+the oval on the infrared one (the two sides are not lined up perfectly).
 
 ## For each picture, do ONE of these
 
