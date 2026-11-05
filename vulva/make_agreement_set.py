@@ -51,10 +51,8 @@ the oval on the infrared one (the two sides are not lined up perfectly). At nigh
 
 ## For each picture, do ONE of these
 
-1. **Vulva visible:** choose the **ellipse** tool with the label `vulva` and draw one oval, on the
-   infrared side, around the **whole vulva: its outer edge, lips and dark centre together** (not only
-   the dark centre).
-   Drag from one corner to the opposite corner, then drag the small handle to turn it if needed.
+1. **Vulva visible:** draw one oval, on the infrared side, around the **whole vulva: its outer edge,
+   lips and dark centre together** (not only the dark centre).
 2. **The tail covers any part of it:** do not draw. Add the tag `tail_covers`.
 3. **Not visible for another reason** (sow turned, lying, blurred, dirty): add the tag `not_visible`.
 
@@ -62,13 +60,16 @@ Only one oval per picture. If you are not sure, make your best guess: we want yo
 
 ## In CVAT (https://app.cvat.ai)
 
-- Open the job you were given. The picture number is at the top; the arrows (or keys `D` / `F`)
-  move to the previous / next picture.
-- **Draw an oval:** on the left toolbar click the **ellipse** icon, pick label `vulva`, click
-  **Shape**, then click-drag on the picture.
-- **Add a tag:** left toolbar, the **tag** icon, pick `not_visible` or `tail_covers`, click **Tag**.
+- Open **Jobs** (top menu) and click your job. `F` goes to the next picture, `D` to the previous one
+  (or use the arrows at the top). The picture number is shown at the top.
+- **Draw an oval:** on the left toolbar click the **ellipse** icon (an oval). Label `vulva`, drawing method
+  **2 Points**, click **Shape**. Then click once at the top-left corner of the vulva and once at its
+  bottom-right corner: the oval fills the box between the two clicks. If the vulva is clearly tilted,
+  choose drawing method **Rotated** instead and click 5 or more points around its edge, then press `N`.
+- **Add a tag:** on the left toolbar click the **tag** icon (the luggage-label shape just below the
+  ellipse icon), pick `not_visible` or `tail_covers`, and press the blue **+** button.
 - **Fix a mistake:** click the oval and press `Delete`, or drag its edges.
-- Press **Save** (the disk icon, top) every few pictures and when you finish.
+- Press **Save** (top left, or `Ctrl+S`) every few pictures and when you finish.
 - When all pictures are done, tell Akbar. He exports the result; you do not need to send files.
 """
 
