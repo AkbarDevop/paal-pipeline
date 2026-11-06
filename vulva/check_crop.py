@@ -521,7 +521,7 @@ def cmd_eval(args):
         if sl:
             lines.append("    " + sl)
     print("\n".join(lines))
-    od = args.out_dir or os.path.join("outputs", "checkcnn_" + os.path.splitext(os.path.basename(args.check))[0]
+    od = args.out_dir or os.path.join("outputs", os.path.splitext(os.path.basename(args.check))[0]
                                       + (f"_{args.split}" if args.split else ""))
     os.makedirs(od, exist_ok=True)
     with open(os.path.join(od, "check_frames.csv"), "w", newline="") as f:
