@@ -39,7 +39,9 @@ python vulva/train_seg.py --labels-from <run>/seg_report.json --classes 3 --inpu
 python vulva/inventory_raw.py <raw roots>                            # what raw data exists: passes per month and day, night, gaps
 python vulva/build_dataset.py <out> --train-from <run>/seg_report.json --add test_newdays feb12 <labels.csv>   # dataset v1: one table, split column, leak checks
 python vulva/train_seg.py --labels <dataset>/labels.csv --split train   # eval_seg.py ... --split test_newdays
-python tests/test_vulva_pipeline.py                                  # 37 synthetic checks
+python vulva/check_view.py fit --run <finder run> --labels <dataset>/labels.csv --split train --out models/check.json   # check step (E2)
+python vulva/check_view.py eval --model <finder.pth> --check models/check.json --labels <dataset>/labels.csv --split test_newdays
+python tests/test_vulva_pipeline.py                                  # 38 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

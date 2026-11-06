@@ -1471,6 +1471,81 @@ def test_inventory_raw_counts_passes_months_night_and_gaps():
     finally:
         shutil.rmtree(tmp)
 
+
+def test_check_view_learns_tails_from_held_out_candidates():
+    """check_view.py fit: from a finder run's held-out predictions (jobs/fold*.npz) it learns to keep
+    round, dome-shaped candidates (vulvas) and drop long, ridge-shaped ones lying on the tail
+    class (tails), cross-validated by the same folds; eval runs finder + check on a labelled set."""
+    from seg_model import VulvaUNet, save_checkpoint
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(5)
+        set_dir = os.path.join(tmp, "set")
+        os.makedirs(os.path.join(set_dir, "masks"))
+        os.makedirs(os.path.join(tmp, "run", "jobs"))
+        yy, xx = np.mgrid[0:384, 0:320].astype(np.float64)
+        fy, fx = np.mgrid[0:480, 0:640].astype(np.float64)
+        rows, folds = [], {0: ([], []), 1: ([], [])}
+        for i in range(32):
+            pid, real = i % 4, i % 2 == 0
+            ts = f"20260210-08-{i:02d}-00"
+            folder = os.path.join(set_dir, ts)
+            os.makedirs(folder)
+            mx, my = 150 + rng.uniform(-15, 15), 200 + rng.uniform(-15, 15)        # model-space centre
+            ax, ay = (14, 20) if real else (5, 42)
+            blob = ((xx - mx) / ax) ** 2 + ((yy - my) / ay) ** 2 <= 1
+            tail = (((xx - mx) / 6) ** 2 + ((yy - (my - 60 if real else my)) / 45) ** 2 <= 1) & ~(blob if real else 0)
+            probs = np.stack([np.where(blob, 0.9, 0.02), np.where(tail, 0.8, 0.01)]).astype(np.float16)
+            Fx, Fy = mx * 380 / 320 + 120, my * 450 / 384 + 30                     # full-frame centre
+            px = 800 / 471.583
+            if real:
+                bump = 10 * np.exp(-(((fx - Fx) ** 2 + (fy - Fy) ** 2) * px ** 2) / (2 * 15.0 ** 2))
+            else:
+                bump = 9 * np.exp(-((fx - Fx) * px) ** 2 / (2 * 6.0 ** 2)) * (np.abs(fy - Fy) < 45)
+            z = np.clip(800 - bump + rng.normal(0, 0.3, fx.shape), 0, 65535).astype(np.uint16)
+            ir = np.full((480, 640), 110, np.uint8)
+            full_blob = (((fx - Fx) / (ax * 380 / 320)) ** 2 + ((fy - Fy) / (ay * 450 / 384)) ** 2) <= 1
+            ir[full_blob] = 40 if real else 95
+            cv2.imwrite(os.path.join(folder, f"pig{pid}_ir_vis_{ts}.jpg"), ir)
+            with open(os.path.join(folder, f"pig{pid}_depth_{ts}.raw"), "wb") as f:
+                f.write(b"\0" * 8)
+                f.write(z.tobytes())
+            row = {"ir_path": f"{ts}/pig{pid}_ir_vis_{ts}.jpg", "mask_path": "", "label": "absent", "pig_id": pid,
+                   "timestamp_folder": ts, "pig_timestamp": ts}
+            if real:
+                from seg_model import to_full_frame
+                cv2.imwrite(os.path.join(set_dir, "masks", f"{i}.png"), to_full_frame(blob.astype(np.uint8)) * 255)
+                row.update(mask_path=f"masks/{i}.png", label="present")
+            rows.append(row)
+            k = 0 if pid < 2 else 1
+            folds[k][0].append(os.path.join(folder, f"pig{pid}_ir_vis_{ts}.jpg"))
+            folds[k][1].append(probs)
+        lab = os.path.join(set_dir, "labels.csv")
+        with open(lab, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        for k, (keys, probs) in folds.items():
+            np.savez(os.path.join(tmp, "run", "jobs", f"fold{k}.npz"), keys=np.array(keys), probs=np.stack(probs))
+        tool = os.path.join(ROOT, "vulva", "check_view.py")
+        chk = os.path.join(tmp, "check.json")
+        o = subprocess.run([PY, tool, "fit", "--run", os.path.join(tmp, "run"), "--labels", lab, "--out", chk,
+                            "--precision", "0.9"], capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stdout[-1500:] + o.stderr[-1500:]
+        model = json.load(open(chk))
+        cv = model["cv"]
+        assert model["candidates"] == 32 and cv["real"] == 16 and cv["false"] == 16, cv
+        assert cv["kept_real"] >= 14 and cv["kept_false"] <= 1, o.stdout
+        ck = os.path.join(tmp, "f.pth")
+        save_checkpoint(VulvaUNet(pretrained=False, n_out=3), ck, {"threshold": 0.5, "min_area": 25, "inputs": "ir",
+                                                                    "classes": 3})
+        o = subprocess.run([PY, tool, "eval", "--model", ck, "--check", chk, "--labels", lab,
+                            "--out-dir", os.path.join(tmp, "ev")], capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stderr[-1500:]
+        assert "with the check" in o.stdout and os.path.exists(os.path.join(tmp, "ev", "check_frames.csv"))
+    finally:
+        shutil.rmtree(tmp)
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):
