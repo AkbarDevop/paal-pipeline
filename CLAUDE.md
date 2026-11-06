@@ -11,6 +11,7 @@ OAK-D ToF camera pipeline for (A) classifying pig postures and (B) measuring vul
 ```bash
 python posture/run_inference.py "C:\PAAL_data\Fed_pig\Pictures_OAK"   # Windows lab PC
 python posture/run_inference.py /path/to/data                          # Mac
+python posture/label_posture.py <data folder or predictions.csv> --first sitting --out labels/new.csv   # label postures by key (0/1/2, Enter = model)
 ```
 
 ### Task B: Vulva pipeline v2 (learned, Oct 2026)
@@ -84,7 +85,8 @@ python vulva/extract_rear_view_pig_manual.py INPUT        # Manual polygon rear-
 - `posture/review_presence.py` — Contact sheets for auditing the pig-presence decision (GT misses or near-threshold skips)
 - `posture/benchmark.py` — Before/after benchmark (shipped model, v1.0 vs v1.1 recipe, grouped CV, smoothing check)
 - `posture/fix_pig_ids.py` / `posture/fix_predictions_csv.py` — Legacy: file renames (dry-run default) / pre-v1.1 CSV patch
-- `tests/test_posture_pipeline.py` — 16 synthetic-data checks (`python tests/test_posture_pipeline.py`)
+- `posture/label_posture.py` — Label postures by key press (0 standing, 1 sitting, 2 lying, Enter = model's guess); reads a data folder or a predictions.csv (`--first sitting` = likely sitting first); writes the labels_posture3.csv format; one file, only OpenCV + NumPy
+- `tests/test_posture_pipeline.py` — 17 synthetic-data checks (`python tests/test_posture_pipeline.py`)
 - `posture/models.py` — MobileNetV2/Xception/DenseNet121 architectures
 - `posture/data_loader.py` — PyTorch Dataset with pig-ID splits
 - `config.py` (repo root) — All paths, crop boxes, class definitions; shared with vulva/

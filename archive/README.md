@@ -8,10 +8,10 @@ Scripts that were used during development but are no longer part of the active p
 | `depth_profile_viewer.py` | One-off debug viewer for depth histograms. |
 | `detect_id_shifts.py` | Stall-depth fingerprinting attempt to detect pig ID shifts. Inconclusive (stalls are equidistant). |
 | `detect_missing_pigs.py` | Diagnostic tool used once during data audit. |
-| `find_sitting.py` | Uncertainty-sampling helper used during 3-class labeling. Labels are now complete. |
+| `find_sitting.py` | Uncertainty-sampling helper used during 3-class labeling. Its idea lives on as `posture/label_posture.py --first sitting`. |
 | `infer_random.py` | Exploratory inference on random frames during model selection. |
 | `inspect_prefilter.py` | Debug script for the old depth-only prefilter (replaced by CNN pig detector). |
-| `label_tool.py` | Used to create `labels/labels.csv` and `labels_posture3.csv`. Labels are complete. |
+| `label_tool.py` | Used to create `labels/labels.csv` and `labels_posture3.csv`. Revived as `posture/label_posture.py` (2026-11-05): no scan step, model-guided order, undo. |
 | `make_slides.py` | Weekly meeting slide generator. Not needed for inference pipeline. |
 | `normalize_posture3_labels.py` | One-time label normalization run. |
 | `plot_pipeline_summary.py`, `plot_pretrain_comparison.py` | One-off plots for meeting decks. |

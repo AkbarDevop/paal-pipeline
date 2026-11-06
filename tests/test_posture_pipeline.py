@@ -391,6 +391,90 @@ def test_multimodal_augmentation_keeps_blocks_aligned():
         assert torch.equal(x[:3], x[3:]), "flip/affine must be shared across modality blocks"
 
 
+
+def test_label_posture_keys_save_resume_and_sitting_first():
+    """label_posture.py: finds sow pictures in timestamp folders (also one level down), orders a predictions.csv
+    by the chance of sitting and finds its pictures again after they moved, saves every answer at once in the
+    labels_posture3.csv format (Enter takes the model's guess, b undoes, s skips), and a second session skips
+    what is done and what is in --already."""
+    from collections import Counter
+    from label_posture import (FIELDS, LabelFile, compose, frames_from_folder, frames_from_predictions, label_loop,
+                               parse_pigs, select)
+    tmp = tempfile.mkdtemp()
+    try:
+        data = os.path.join(tmp, "Pictures_OAK")
+        img = np.full((48, 64, 3), 90, np.uint8)
+        for t, folder in enumerate(("20260206-10-00-00", "20260206-11-00-00")):
+            d = os.path.join(data, "OAK_0206", folder)
+            os.makedirs(d)
+            for pig in range(3):
+                ts = f"20260206-{10 + t:02d}-00-{pig:02d}"
+                for kind in ("ir_vis", "depth_vis", "rgb"):
+                    cv2.imwrite(os.path.join(d, f"pig{pig}_{kind}_{ts}.jpg"), img)
+            cv2.imwrite(os.path.join(d, f"pig9_ir_vis_{folder}_cropped.jpg"), img)        # not a capture
+        d = os.path.join(data, "OAK_0206", "20260206-11-00-00")      # one capture with only the raw depth
+        os.remove(os.path.join(d, "pig0_depth_vis_20260206-11-00-00.jpg"))
+        z = np.full((480, 640), 900, np.uint16)
+        z[200:300, 250:400] = 700
+        with open(os.path.join(d, "pig0_depth_20260206-11-00-00.raw"), "wb") as f:
+            f.write(b"\0" * 8 + z.tobytes())
+        frames = frames_from_folder(data)
+        assert len(frames) == 6 and (frames[0]["timestamp_folder"], frames[0]["pig_id"]) == ("20260206-10-00-00", 0)
+        assert all(os.path.exists(f["depth_jpg"]) and os.path.exists(f["rgb_jpg"]) for f in frames)
+        assert frames[3]["depth_jpg"].endswith(".raw") and compose(frames[3], 3, 6, Counter()).shape[2] == 3
+
+        pred = os.path.join(tmp, "predictions.csv")                  # written on another computer
+        sit = [0.1, 0.9, 0.3, 0.05, 0.6, 0.2]
+        with open(pred, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp_folder", "pig_id", "pig_timestamp", "prediction", "image_path",
+                        "prob_standing", "prob_sitting", "prob_lying"])
+            for fr, s in zip(frames, sit):
+                w.writerow([fr["timestamp_folder"], fr["pig_id"], fr["pig_timestamp"], 1 if s > 0.5 else 2,
+                            "D:/elsewhere/" + fr["timestamp_folder"] + "/x.jpg", round(0.95 - s, 2), s, 0.05])
+        pf = select(frames_from_predictions(pred, data), first="sitting")
+        assert [f["probs"][1] for f in pf] == sorted(sit, reverse=True) and os.path.exists(pf[0]["ir_jpg"])
+        assert parse_pigs("0-2,7") == {0, 1, 2, 7} and len(select(pf, pigs={1})) == 2
+
+        out = os.path.join(tmp, "labels", "new.csv")
+        keys = iter([ord("1"), ord("s"), ord("2"), ord("b"), ord("0"), 13, ord("q")])
+        shown = []
+        counts, left = label_loop(pf, out, shown.append, lambda: next(keys))
+        with open(out, newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert list(rows[0]) == FIELDS
+        # sitting order: (10h, pig 1) 0.9, (11h, pig 1) 0.6 skipped, (10h, pig 2) lying then undone -> standing,
+        # (11h, pig 2) Enter -> the model's guess (lying); quit at the next one
+        assert [(r["timestamp_folder"][9:11], r["pig_id"], r["label"]) for r in rows] == \
+            [("10", "1", "1"), ("10", "2", "0"), ("11", "2", "2")], rows
+        assert counts == Counter({0: 1, 1: 1, 2: 1}) and left == 2 and len(shown) == 7
+        assert all(im.ndim == 3 for im in shown)
+
+        other = os.path.join(tmp, "train_labels.csv")                # the skipped one, labelled elsewhere
+        with open(other, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDS)
+            w.writeheader()
+            fr = pf[1]
+            w.writerow({**{k: fr[k] for k in FIELDS[:-1]}, "ir_jpg": "/Users/x/" + os.path.basename(fr["ir_jpg"]),
+                        "label": 1})
+        keys = iter([ord("q")])
+        counts, left = label_loop(pf, out, lambda im: None, lambda: next(keys), already=[other])
+        assert left == 2 and not counts                              # only (10h, pig 0) and (11h, pig 0) remain
+
+        bad = os.path.join(tmp, "bad.csv")
+        with open(bad, "w") as f:
+            f.write("a,b\n1,2\n")
+        try:
+            LabelFile(bad)
+            raise AssertionError("accepted a file with other columns")
+        except SystemExit:
+            pass
+        o = subprocess.run([sys.executable, os.path.join(ROOT, "posture", "label_posture.py"), "--help"],
+                           capture_output=True, text=True)
+        assert o.returncode == 0 and "model's guess" in o.stdout
+    finally:
+        shutil.rmtree(tmp)
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
