@@ -11,7 +11,14 @@ SEG_W x SEG_H, ImageNet-normalised. Two input sets, stored in the checkpoint:
   "ir"        grey IR replicated to 3 channels (models up to r1)
   "ir+depth"  IR, height above the sow's own skin and 3D shading as the three
               channels (depth_views.py). The vulva sticks out of the skin, while
-              feces and dark marks are flat, so depth separates the two.
+              feces and dark marks are flat, so depth separates the two. (Old way: it
+              feeds depth into filters trained on colour photos; lost to IR, r2d / r8.)
+  "depth"     depth only: height above the local skin (+/-20 mm), shape index (dome = +1,
+              ridge such as a tail = +0.5, flat = 0) and curvedness (depth_features)
+  "fusion"    IR replicated to 3 channels + height + shape index = 5 channels; the first
+              layer keeps its ImageNet weights for the IR channels and starts at zero for
+              the two depth channels, so training starts from the IR model and learns how
+              much to use depth (standard way to add a channel to a pretrained network)
 A predicted mask is mapped back to the full 640 x 480 frame so it lines up with
 the depth image from the same sensor.
 """
@@ -35,6 +42,7 @@ SEG_W, SEG_H = 320, 384          # crop 380 x 450 -> about 0.84 scale
 FULL_W, FULL_H = 640, 480
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 STD = np.array([0.229, 0.224, 0.225], np.float32)
+DEPTH_MEAN, DEPTH_STD = 0.5, 0.25   # depth feature channels are stored as 0..255 with 128 = neutral
 
 
 def crop_box(w=FULL_W, h=FULL_H):
@@ -66,8 +74,61 @@ def read_mask(path):
     return (m > 127).astype(np.uint8)
 
 
-INPUTS = ("ir", "ir+depth")
+INPUTS = ("ir", "ir+depth", "depth", "fusion")
 HEIGHT_SPAN_MM = 8.0
+FEAT_HEIGHT_MM = 20.0     # depth features: height clipped to +/- this (the vulva rises ~8-11 mm)
+FEAT_SKIN_MM = 25.0       # the "skin" a bump is measured against: depth smoothed over this scale
+FEAT_CURV_MM = 10.0       # smoothing before curvature (ToF noise; 6 mm left speckle everywhere)
+FEAT_CURV_REF = 0.015     # 1/mm: curvature below this counts as flat (shape index faded out)
+
+
+def in_channels_for(inputs):
+    return 5 if inputs == "fusion" else 3
+
+
+def depth_features(depth_mm, fx=471.583):
+    """ToF depth (480 x 640, mm, 0 = no reading) -> three uint8 maps on the same grid:
+    height above the local skin (+/-FEAT_HEIGHT_MM -> 0..255, 128 = level), shape index
+    (-1 cup .. -0.5 valley .. 0 saddle/flat .. +0.5 ridge .. +1 dome -> 0..255) faded to 0
+    where the surface is nearly flat, and curvedness (0 .. 4 x FEAT_CURV_REF -> 0..255).
+    Holes are filled from their surroundings first; scales are in mm on the sow, converted to
+    pixels with the median distance, so near and far sows give the same maps."""
+    d = depth_mm.astype(np.float32)
+    valid = ((d > 300) & (d < 3000)).astype(np.float32)
+    if valid.sum() < 100:
+        h = np.full(d.shape, 128, np.uint8)
+        return h, h.copy(), np.zeros(d.shape, np.uint8)
+    x1, y1, x2, y2 = crop_box(d.shape[1], d.shape[0])
+    vz = d[y1:y2, x1:x2][valid[y1:y2, x1:x2] > 0]
+    z = float(np.median(vz)) if vz.size else float(np.median(d[valid > 0]))
+    px_per_mm = fx / max(z, 1.0)
+
+    def blur(a, sigma_px):
+        return cv2.GaussianBlur(a, (0, 0), max(sigma_px, 0.5))
+
+    w3 = blur(valid, 3.0)
+    filled = np.where(valid > 0, d, blur(d * valid, 3.0) / np.maximum(w3, 1e-3))
+    seen = (valid > 0) | (w3 > 0.1)
+    fine = blur(filled, 1.5)
+    skin = blur(filled, FEAT_SKIN_MM * px_per_mm)
+    height = np.clip(skin - fine, -FEAT_HEIGHT_MM, FEAT_HEIGHT_MM)        # + = towards the camera
+
+    f = -blur(filled, FEAT_CURV_MM * px_per_mm).astype(np.float64)        # surface height field
+    fy, fx_ = np.gradient(f)
+    fxy, fxx = np.gradient(fx_)
+    fyy, _ = np.gradient(fy)
+    fxx, fyy, fxy = (a * px_per_mm ** 2 for a in (fxx, fyy, fxy))          # 1/mm
+    tr, disc = fxx + fyy, np.sqrt(((fxx - fyy) / 2) ** 2 + fxy ** 2)
+    k1, k2 = tr / 2 + disc, tr / 2 - disc                                 # k1 >= k2
+    si = -(2 / np.pi) * np.arctan((k1 + k2) / (k1 - k2 + 1e-9))
+    curv = np.sqrt((k1 ** 2 + k2 ** 2) / 2)
+    si_eff = si * np.clip(curv / FEAT_CURV_REF, 0, 1)
+
+    h8 = np.clip((height + FEAT_HEIGHT_MM) / (2 * FEAT_HEIGHT_MM) * 255, 0, 255).astype(np.uint8)
+    s8 = np.clip((si_eff + 1) / 2 * 255, 0, 255).astype(np.uint8)
+    c8 = np.clip(curv / (4 * FEAT_CURV_REF) * 255, 0, 255).astype(np.uint8)
+    h8[~seen], s8[~seen], c8[~seen] = 128, 128, 0
+    return h8, s8, c8
 
 
 def default_depth_path(ir_path):
@@ -82,6 +143,11 @@ def make_input(ir_gray, depth_mm=None, inputs="ir"):
     Missing depth gives flat height and zero shading, which the model sees as 'no 3D cue'."""
     if inputs == "ir":
         return ir_gray
+    if inputs in ("depth", "fusion"):
+        if depth_mm is None:
+            return None                       # no depth: these models cannot see the frame
+        h8, s8, c8 = depth_features(depth_mm)
+        return np.dstack([h8, s8, c8]) if inputs == "depth" else np.dstack([ir_gray, h8, s8])
     if inputs != "ir+depth":
         raise ValueError(f"unknown inputs {inputs!r}; expected one of {INPUTS}")
     h = np.full(ir_gray.shape, 128, np.uint8)
@@ -96,7 +162,8 @@ def make_input(ir_gray, depth_mm=None, inputs="ir"):
 
 
 def read_input(ir_path, depth_path=None, inputs="ir"):
-    """IR (+ depth) files -> full-frame model input, or None if the IR is unreadable."""
+    """IR (+ depth) files -> full-frame model input, or None if the IR is unreadable (or, for
+    "depth" / "fusion", the depth file is missing)."""
     ir = read_ir(ir_path)
     if ir is None or inputs == "ir":
         return ir
@@ -128,13 +195,22 @@ def to_full_frame(mask_small):
     return full
 
 
-def to_tensor(img):
-    """Grey (replicated) or H x W x 3 uint8 -> normalised 3 x H x W tensor."""
+def to_tensor(img, inputs=None):
+    """Model-space input -> normalised C x H x W tensor.
+    grey ("ir")        -> IR replicated to 3 channels, ImageNet mean/std
+    3 channels         -> "ir+depth" (ImageNet mean/std) or "depth" (DEPTH_MEAN/STD)
+    "fusion" [ir, h, s] -> 5 channels: IR x 3 (ImageNet) + height + shape (DEPTH_MEAN/STD)"""
     x = img.astype(np.float32) / 255.0
     if x.ndim == 2:
         x = np.repeat(x[..., None], 3, axis=2)
-    x = (x - MEAN) / STD
-    return torch.from_numpy(x.transpose(2, 0, 1).copy())
+    if inputs == "fusion":
+        ir = (np.repeat(x[..., :1], 3, axis=2) - MEAN) / STD
+        x = np.concatenate([ir, (x[..., 1:3] - DEPTH_MEAN) / DEPTH_STD], axis=2)
+    elif inputs == "depth":
+        x = (x - DEPTH_MEAN) / DEPTH_STD
+    else:
+        x = (x - MEAN) / STD
+    return torch.from_numpy(x.transpose(2, 0, 1).astype(np.float32).copy())
 
 
 class _Up(nn.Module):
@@ -153,11 +229,17 @@ class VulvaUNet(nn.Module):
     """ResNet-18 encoder + 4-stage decoder -> logits per pixel at input resolution:
     1 channel (vulva vs not) or, with n_out=3, background / vulva / tail."""
 
-    def __init__(self, pretrained=True, n_out=1):
+    def __init__(self, pretrained=True, n_out=1, in_ch=3):
         super().__init__()
-        self.n_out = n_out
+        self.n_out, self.in_ch, self.inputs = n_out, in_ch, None
         from torchvision.models import ResNet18_Weights, resnet18
         enc = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+        if in_ch != 3:                   # extra input channels: keep the RGB filters, new ones start at zero
+            old = enc.conv1
+            enc.conv1 = nn.Conv2d(in_ch, 64, 7, 2, 3, bias=False)
+            with torch.no_grad():
+                enc.conv1.weight.zero_()
+                enc.conv1.weight[:, :3] = old.weight
         self.stem = nn.Sequential(enc.conv1, enc.bn1, enc.relu)      # 64, /2
         self.pool = enc.maxpool                                      # /4
         self.l1, self.l2, self.l3, self.l4 = enc.layer1, enc.layer2, enc.layer3, enc.layer4
@@ -193,8 +275,10 @@ def n_out_for(ckpt):
 
 def load_checkpoint(path, device="cpu"):
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    model = VulvaUNet(pretrained=False, n_out=n_out_for(ckpt))
+    inputs = ckpt.get("inputs", "ir")
+    model = VulvaUNet(pretrained=False, n_out=n_out_for(ckpt), in_ch=in_channels_for(inputs))
     model.load_state_dict(ckpt["state_dict"])
+    model.inputs = inputs
     model.to(device).eval()
     return model, ckpt
 
@@ -254,13 +338,22 @@ def predict_parts(model, grays, device="cpu", threshold=0.5, min_area=None, batc
     (the tail cuts into the vulva: partly covered, so its size is not trusted), pmax, area,
     conf (mean vulva probability in the blob)."""
     out = []
-    n_out = getattr(model, "n_out", 1)
+    n_out, inputs = getattr(model, "n_out", 1), getattr(model, "inputs", None)
     for i in range(0, len(grays), batch_size):
         chunk = grays[i:i + batch_size]
-        x = torch.stack([to_tensor(to_model_space(g)[0]) for g in chunk]).to(device)
-        logits = model(x)
-        probs = (torch.softmax(logits, 1) if n_out == 3 else torch.sigmoid(logits)[:, 0]).cpu().numpy()
-        for p in probs:
+        live = [g for g in chunk if g is not None]          # None: unreadable, or no depth for a depth model
+        probs = []
+        if live:
+            x = torch.stack([to_tensor(to_model_space(g)[0], inputs) for g in live]).to(device)
+            logits = model(x)
+            probs = list((torch.softmax(logits, 1) if n_out == 3 else torch.sigmoid(logits)[:, 0]).cpu().numpy())
+        probs.reverse()
+        for g in chunk:
+            if g is None:
+                out.append({"vulva": np.zeros((FULL_H, FULL_W), np.uint8), "tail": None, "covered_by_tail": False,
+                            "pmax": 0.0, "area": 0, "conf": 0.0, "no_input": True})
+                continue
+            p = probs.pop()
             vul, pv, tail, area = parts_from_probs(p, threshold, min_area)
             conf = blob_confidence(pv, vul)
             if conf < presence:

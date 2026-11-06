@@ -53,7 +53,7 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, blob_confidence, parts_from_probs,  # noqa: E402
+from seg_model import (INPUTS, SEG_H, SEG_W, VulvaUNet, blob_confidence, in_channels_for, parts_from_probs,  # noqa: E402
                        read_input, read_mask, save_checkpoint, to_model_space, to_tensor, covered_by_tail)
 from select_frames import index_folders  # noqa: E402
 
@@ -181,8 +181,8 @@ def assign_folds(pigs, k, seed=42):
 
 
 class SegData(Dataset):
-    def __init__(self, items, augment):
-        self.items, self.augment = items, augment
+    def __init__(self, items, augment, inputs="ir"):
+        self.items, self.augment, self.inputs = items, augment, inputs
 
     def __len__(self):
         return len(self.items)
@@ -202,9 +202,9 @@ class SegData(Dataset):
             a, b = random.uniform(0.7, 1.3), random.uniform(-25, 25)
             if g.ndim == 2:
                 g = np.clip(g.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
-            else:                                  # brightness/contrast only on the IR channel
+            elif self.inputs != "depth":           # brightness/contrast only on the IR channel (none for depth)
                 g[..., 0] = np.clip(g[..., 0].astype(np.float32) * a + b, 0, 255).astype(np.uint8)
-        return (to_tensor(g), torch.from_numpy(m.astype(np.float32))[None],
+        return (to_tensor(g, self.inputs), torch.from_numpy(m.astype(np.float32))[None],
                 torch.tensor(float(self.items[i].get("tail_known", False))))
 
 
@@ -250,14 +250,16 @@ def loss_fn(logits, target, pos_weight=1.0, known=None):
 
 
 def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_size=8, log=None, pos_weight=1.0,
-                classes=2):
-    model = VulvaUNet(pretrained=pretrained, n_out=3 if classes == 3 else 1).to(device)
+                classes=2, inputs="ir"):
+    model = VulvaUNet(pretrained=pretrained, n_out=3 if classes == 3 else 1, in_ch=in_channels_for(inputs)).to(device)
+    model.inputs = inputs
     pos = [it for it in train_items if has_vulva(it)]
     neg = [it for it in train_items if not has_vulva(it)]
     # balance: present frames are the minority
     weights = [1.0 / max(len(pos), 1) if has_vulva(it) else 1.0 / max(len(neg), 1) for it in train_items]
     sampler = torch.utils.data.WeightedRandomSampler(weights, num_samples=len(train_items), replacement=True)
-    dl = DataLoader(SegData(train_items, augment=True), batch_size=batch_size, sampler=sampler, num_workers=0)
+    dl = DataLoader(SegData(train_items, augment=True, inputs=inputs), batch_size=batch_size, sampler=sampler,
+                    num_workers=0)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     steps = max(1, epochs * len(dl))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 0.5 * (1 + math.cos(math.pi * min(s, steps) / steps)))
@@ -282,7 +284,7 @@ def predict_probs(model, items, device):
     model.eval()
     out = []
     for i in range(0, len(items), 16):
-        x = torch.stack([to_tensor(it["image"]) for it in items[i:i + 16]]).to(device)
+        x = torch.stack([to_tensor(it["image"], getattr(model, "inputs", None)) for it in items[i:i + 16]]).to(device)
         logits = model(x)
         if logits.shape[1] == 3:              # keep vulva and tail; background = 1 - both
             out.extend(torch.softmax(logits, 1)[:, 1:].cpu().numpy().astype(np.float16))
@@ -374,6 +376,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", nargs="+", default=[os.path.join("labels", "vulva_seg_labels.csv")],
                     help="one or more label CSVs (e.g. February + January), trained on together")
+    ap.add_argument("--labels-from", default="",
+                    help="seg_report.json of an earlier run: train on exactly its label files (fair comparisons)")
     ap.add_argument("--frames-root", default="",
                     help="';'-separated folders with the raw timestamp folders, for labelled frames whose images "
                          "are not next to their labels (only labels.csv + masks/ copied)")
@@ -386,7 +390,8 @@ def main():
     ap.add_argument("--pos-weight", type=float, default=1.0,
                     help="BCE weight on vulva pixels; above 1 grows masks (Dice already handles imbalance)")
     ap.add_argument("--inputs", choices=INPUTS, default="ir",
-                    help='"ir" or "ir+depth" (IR, height above the skin and 3D shading as the 3 channels)')
+                    help='"ir"; "depth" (height above the local skin, shape index, curvedness); "fusion" (IR x 3 + '
+                         'height + shape index, depth weights start at zero); "ir+depth" = the old 3-channel swap')
     ap.add_argument("--presence-precision", type=float, default=None,
                     help="tune the 'vulva visible' confidence cut to this out-of-fold precision (0 = no cut; "
                          "default 0.9 for 2 classes, 0 for 3)")
@@ -408,6 +413,9 @@ def main():
     ap.add_argument("--rescore", action="store_true",
                     help="no training: recompute the CV report from <out-dir>/jobs of a finished --jobs run")
     args = ap.parse_args()
+    if args.labels_from:
+        with open(args.labels_from) as f:
+            args.labels = json.load(f)["labels"]
     if args.presence_precision is None:
         args.presence_precision = 0.0 if args.classes == 3 else 0.9
     global SCALE_AUG
@@ -461,7 +469,7 @@ def main():
                 log(f"Fold {k + 1}/{args.folds}: test sows {report['folds'][str(k)]} "
                     f"({len(te_idx)} frames, train {len(tr)})")
                 model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                                    args.pos_weight, args.classes)
+                                    args.pos_weight, args.classes, args.inputs)
                 probs = predict_probs(model, [items[i] for i in te_idx], device)
                 for i, pr in zip(te_idx, probs):
                     oof_probs[i] = pr
@@ -474,11 +482,12 @@ def main():
     log("")
     log(f"Final model on all {len(items)} frames ...")
     if args.jobs > 1 and args.folds and len(pigs) >= args.folds:
-        model = VulvaUNet(pretrained=False, n_out=3 if args.classes == 3 else 1)
+        model = VulvaUNet(pretrained=False, n_out=3 if args.classes == 3 else 1, in_ch=in_channels_for(args.inputs))
         model.load_state_dict(final_state)
+        model.inputs = args.inputs
     else:
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                            args.pos_weight, args.classes)
+                            args.pos_weight, args.classes, args.inputs)
     save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold, "inputs": args.inputs,
                                             "classes": args.classes,
                                             "presence_threshold": presence, "scale_aug": args.scale_aug,
@@ -541,7 +550,7 @@ def run_job(args):
     if k == args.folds:
         log(f"Final model on all {len(items)} frames ({device})")
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                            args.pos_weight, args.classes)
+                            args.pos_weight, args.classes, args.inputs)
         torch.save(model.state_dict(), os.path.join(args.job_dir, "final.pt"))
         return
     folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
@@ -549,7 +558,7 @@ def run_job(args):
     te = [it for it in items if folds[it["pig_id"]] == k]
     log(f"Fold {k + 1}/{args.folds}: {len(te)} test frames, train {len(tr)} ({device})")
     model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                        args.pos_weight, args.classes)
+                        args.pos_weight, args.classes, args.inputs)
     probs = predict_probs(model, te, device)
     np.savez(os.path.join(args.job_dir, f"fold{k}.npz"), keys=np.array([it["row"]["ir_path"] for it in te]),
              probs=np.stack(probs))

@@ -398,15 +398,15 @@ def test_train_and_run_end_to_end():
         assert "With confidence cut" in out_train or "No confidence cut" in out_train
         assert os.path.exists(os.path.join(outdir, "vulva_daily.csv"))
         assert os.path.exists(os.path.join(outdir, "vulva_summary.json"))
-        # IR + depth model: trains, records its inputs, and run_vulva feeds it depth
+        # IR + depth fusion model (5 channels): trains, records its inputs, and run_vulva feeds it depth
         model_d = os.path.join(tmp, "models", "vulva_seg_d.pth")
         out = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels", labels, "--folds", "0",
-                              "--epochs", "3", "--no-pretrained", "--inputs", "ir+depth", "--out-model", model_d,
+                              "--epochs", "3", "--no-pretrained", "--inputs", "fusion", "--out-model", model_d,
                               "--out-dir", os.path.join(tmp, "seg_d")], capture_output=True, text=True, cwd=tmp)
         assert out.returncode == 0, out.stderr[-2000:]
-        assert "(inputs: ir+depth" in out.stdout
+        assert "(inputs: fusion" in out.stdout
         import torch
-        assert torch.load(model_d, map_location="cpu", weights_only=False)["inputs"] == "ir+depth"
+        assert torch.load(model_d, map_location="cpu", weights_only=False)["inputs"] == "fusion"
         assert "presence_threshold" in torch.load(model, map_location="cpu", weights_only=False)
         out = subprocess.run([PY, os.path.join(ROOT, "vulva", "run_vulva.py"), pred_csv, "--model", model_d,
                               "--out-dir", os.path.join(tmp, "out_d"), "--min-frames", "1"],
@@ -573,6 +573,55 @@ def test_depth_input_stack():
     assert make_input(ir, depth, "ir") is ir
     im, _ = to_model_space(x)
     assert to_tensor(im).shape == (3, 384, 320) and to_tensor(to_model_space(ir)[0]).shape == (3, 384, 320)
+    # the new inputs: depth only (height, shape index, curvedness) and fusion (IR + height + shape index)
+    xd, xf = make_input(ir, depth, "depth"), make_input(ir, depth, "fusion")
+    assert xd.shape == (480, 640, 3) and xf.shape == (480, 640, 3) and (xf[..., 0] == 90).all()
+    assert np.median(xd[..., 0][mask]) > 140 and abs(int(np.median(xd[..., 0][380:450, 400:560])) - 128) < 12
+    assert (xf[..., 1] == xd[..., 0]).all() and (xf[..., 2] == xd[..., 1]).all()
+    assert make_input(ir, None, "depth") is None and make_input(ir, None, "fusion") is None
+    assert to_tensor(to_model_space(xf)[0], "fusion").shape == (5, 384, 320)
+    assert to_tensor(to_model_space(xd)[0], "depth").shape == (3, 384, 320)
+
+
+def test_depth_features_tell_a_dome_from_a_ridge():
+    """depth_features: the shape index reads a round bump (vulva) as a dome (near +1), a long
+    narrow bump (tail) as a ridge (near +0.5) and flat skin as neutral (128); height is high on both."""
+    from seg_model import depth_features
+    yy, xx = np.mgrid[0:480, 0:640].astype(np.float64)
+    px = 800 / 471.583                                              # mm per pixel at 800 mm
+    dome = 10 * np.exp(-(((xx - 260) ** 2 + (yy - 260) ** 2) * px ** 2) / (2 * 15.0 ** 2))
+    ridge = 10 * np.exp(-((xx - 400) * px) ** 2 / (2 * 8.0 ** 2)) * ((yy > 120) & (yy < 400))
+    z = 800 - dome - ridge + np.random.default_rng(1).normal(0, 0.3, xx.shape)
+    h8, s8, c8 = depth_features(np.clip(z, 0, 65535).astype(np.uint16))
+    si = lambda y, x: (float(s8[y, x]) / 255) * 2 - 1                 # noqa: E731
+    assert si(260, 260) > 0.75, si(260, 260)
+    assert 0.3 < si(260, 400) < 0.7, si(260, 260)
+    assert abs(si(420, 160)) < 0.1 and h8[260, 260] > 150 and h8[260, 400] > 150
+    assert c8[260, 260] > c8[420, 160]
+
+
+def test_fusion_model_starts_from_the_ir_filters():
+    """VulvaUNet(in_ch=5): the two depth channels of the first layer start at zero (the network
+    starts as the IR model); a fusion checkpoint loads back as 5 channels with its inputs, and
+    predict_parts skips frames without an input (no depth file) instead of failing."""
+    import torch
+    from seg_model import VulvaUNet, load_checkpoint, make_input, predict_parts, save_checkpoint
+    m = VulvaUNet(pretrained=False, n_out=3, in_ch=5)
+    w = m.stem[0].weight.detach()
+    assert w.shape[1] == 5 and float(w[:, 3:].abs().sum()) == 0 and float(w[:, :3].abs().sum()) > 0
+    assert m(torch.zeros(1, 5, 384, 320)).shape == (1, 3, 384, 320)
+    tmp = tempfile.mkdtemp()
+    try:
+        ck = os.path.join(tmp, "f.pth")
+        save_checkpoint(m, ck, {"threshold": 0.5, "min_area": 25, "inputs": "fusion", "classes": 3})
+        m2, ckpt = load_checkpoint(ck)
+        assert m2.in_ch == 5 and m2.inputs == "fusion" and ckpt["inputs"] == "fusion"
+        depth, _ = render(tilt_deg=20, dist=700, W=40, L=70, H=15, noise=0.5, cx=320, cy=240)
+        x = make_input(np.full((480, 640), 90, np.uint8), depth, "fusion")
+        out = predict_parts(m2, [x, None])
+        assert len(out) == 2 and out[0]["vulva"].shape == (480, 640) and out[1].get("no_input")
+    finally:
+        shutil.rmtree(tmp)
 
 
 def test_depth_views_show_the_bump_and_drop_the_background():
