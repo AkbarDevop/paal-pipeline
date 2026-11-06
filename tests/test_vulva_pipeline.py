@@ -1267,6 +1267,48 @@ def test_agreement_set_cvat_round_trip_and_compare():
         shutil.rmtree(tmp)
 
 
+
+def test_depth_outline_finds_the_bump_like_the_paper():
+    """depth_outline.py: a vulva-shaped bump on a curved, tilted rump is found from a rough seed,
+    its outline comes from the bump (not the seed), a tail ridge next to it is left out when its
+    mask is given, a flat area is called flat and a too-small seed is reported as clipped."""
+    from depth_outline import depth_outline
+    rng = np.random.default_rng(7)
+    yy, xx = np.mgrid[0:480, 0:640].astype(np.float64)
+    cx, cy, a, b = 300.0, 250.0, 14.0, 24.0                      # bump half-axes (x, y) in pixels
+    base = 800 + 0.05 * (xx - 320) + 0.0015 * ((xx - 300) ** 2 + (yy - 250) ** 2)
+
+    def ell(scale, dx=0.0, dy=0.0):
+        return ((xx - cx - dx) / (a * scale)) ** 2 + ((yy - cy - dy) / (b * scale)) ** 2 <= 1
+
+    r = np.sqrt(((xx - cx) / a) ** 2 + ((yy - cy) / b) ** 2)
+    bump = 10 * np.exp(-r ** 4)
+    tail = (np.abs(xx - 300) < 5) & (yy > 180) & (yy < 222)       # ridge ending just above the bump
+    tail_h = np.where(tail, 9.0, 0.0)
+
+    def frame(with_bump=True, with_tail=False):
+        z = base - (bump if with_bump else 0) - (tail_h if with_tail else 0) + rng.normal(0, 0.7, base.shape)
+        return np.clip(np.round(z), 0, 65535).astype(np.uint16)
+
+    res = depth_outline(frame(), ell(1.1, 2, -2))
+    assert res["status"] == "ok", res["status"]
+    ex, ey, h1, h2, _ = res["ellipse"]
+    big, small = max(h1, h2), min(h1, h2)
+    # threshold max(2 mm, 20% of 10 mm) on 10 exp(-r^4) -> r = (ln 5)^(1/4) = 1.126
+    assert abs(ex - cx) < 3 and abs(ey - cy) < 3, (ex, ey)
+    assert abs(big / (1.126 * b) - 1) < 0.15 and abs(small / (1.126 * a) - 1) < 0.15, (big, small)
+    assert 8 < res["peak_mm"] < 12 and res["roundness"] > 0.85 and res["clipped"] < 0.3, res
+
+    tail_mask = tail.copy()
+    res_t = depth_outline(frame(with_tail=True), ell(1.1, 2, -2), tail=tail_mask)
+    assert res_t["status"] == "ok"
+    big_t = max(res_t["ellipse"][2:4])
+    assert abs(big_t / (1.126 * b) - 1) < 0.15, big_t
+
+    assert depth_outline(frame(with_bump=False), ell(1.0))["status"] == "flat"
+    res_c = depth_outline(frame(), ell(0.6))
+    assert res_c["status"] == "ok" and res_c["clipped"] > 0.3, res_c["clipped"]
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):

@@ -34,7 +34,8 @@ python vulva/train_seg.py --labels <sets>/labels.csv --classes 3   # background 
 python vulva/make_agreement_set.py <labels.csv> <set> --frames-root <raw>   # 50 pictures for CVAT Online
 python vulva/import_cvat.py <export.zip> <set> --who lucas            # CVAT export -> labels_lucas.csv
 python vulva/compare_labels.py <ref.csv> <set>/labels_lucas.csv --manifest <set>/manifest.csv   # human agreement
-python tests/test_vulva_pipeline.py                                  # 32 synthetic checks
+python vulva/depth_outline.py <labels.csv> --n 20 --out outputs/depth_outline_look   # paper-style bump outline from depth, sheets
+python tests/test_vulva_pipeline.py                                  # 33 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)
