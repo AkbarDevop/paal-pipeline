@@ -132,12 +132,13 @@ def score_lr(Z, w):
 
 
 def pick_cut(scores, y, precision):
-    """Lowest cut whose kept set reaches the precision target (most real vulvas kept)."""
+    """Lowest cut whose kept set reaches the precision target (most real vulvas kept). The cut sits on
+    a real vulva's score, so no false candidate below the last kept real one is let in."""
     order = np.argsort(-scores)
     s, t = scores[order], y[order]
     tp = np.cumsum(t)
     prec = tp / np.arange(1, len(t) + 1)
-    ok = np.nonzero(prec >= precision)[0]
+    ok = np.nonzero((prec >= precision) & (t == 1))[0]
     if not len(ok):
         return float(s[0]) + 1e-9
     k = ok.max()
@@ -148,6 +149,19 @@ def pr_at(scores, y, cut):
     kept = scores >= cut
     tp, fp = int((kept & (y == 1)).sum()), int((kept & (y == 0)).sum())
     return tp, fp, int((y == 1).sum()), int((y == 0).sum())
+
+
+def size_line(kept_sizes, all_sizes):
+    """Are the kept real vulvas bigger or smaller than all visible ones? Sizes: sqrt of the hand
+    outline's area in pixels. A check that prefers big blobs would bias the size measurement
+    (and, keeping few frames on days the vulva is small, flatten the rise at heat)."""
+    k, a = np.asarray(kept_sizes, float), np.asarray(all_sizes, float)
+    k, a = k[k > 0], a[a > 0]
+    if not len(k) or not len(a):
+        return ""
+    mk, ma = float(np.median(k)), float(np.median(a))
+    return (f"size of the kept real vulvas (hand outline, sqrt of area): median {mk:.1f} px vs {ma:.1f} px "
+            f"for all visible (x{mk / ma:.2f})")
 
 
 # ------------------------------------------------------------------ fit
@@ -262,18 +276,23 @@ def cmd_eval(args):
                 X = np.array([[f[n] for n in chk["features"]]], float)
                 score = float(score_lr(standardise(X, m, s)[0], w)[0])
                 keep_rule = (not d["covered_by_tail"]) if tail is not None else d["conf"] >= presence
+            size = float(np.sqrt((hm > 0).sum())) if hm is not None else 0.0
             out.append({"ir_path": r["ir_path"], "label": r["label"], "candidate": int(vul.any()), "iou": round(iou, 3),
                         "real": int(real), "check_score": round(score, 4), "check_keep": int(vul.any() and score >= chk["cut"]),
-                        "rule_keep": int(vul.any() and keep_rule)})
+                        "rule_keep": int(vul.any() and keep_rule), "hand_size_px": round(size, 1)})
     n_vis = sum(1 for o in out if o["label"] == "present")
     n_not = len(out) - n_vis
     lines = [f"{args.model} + check {args.check} on {args.labels} (split {args.split}): {len(out)} frames, "
              f"{n_vis} with a visible vulva, {n_not} without"]
+    all_sizes = [o["hand_size_px"] for o in out if o["label"] == "present"]
     for name, k in (("finder's own rule", "rule_keep"), ("with the check", "check_keep")):
         kr = sum(1 for o in out if o[k] and o["real"])
         kf = sum(1 for o in out if o[k] and not o["real"])
         lines.append(f"  {name}: keeps {kr} of {n_vis} real vulvas ({kr / max(n_vis, 1):.0%}) and {kf} false "
                      f"(precision {kr / max(kr + kf, 1):.3f})")
+        sl = size_line([o["hand_size_px"] for o in out if o[k] and o["real"]], all_sizes)
+        if sl:
+            lines.append("    " + sl)
     print("\n".join(lines))
     od = args.out_dir or os.path.join("outputs", "check_" + os.path.splitext(os.path.basename(args.model))[0]
                                       + (f"_{args.split}" if args.split else ""))

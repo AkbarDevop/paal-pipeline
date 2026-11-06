@@ -41,7 +41,9 @@ python vulva/build_dataset.py <out> --train-from <run>/seg_report.json --add tes
 python vulva/train_seg.py --labels <dataset>/labels.csv --split train   # eval_seg.py ... --split test_newdays
 python vulva/check_view.py fit --run <finder run> --labels <dataset>/labels.csv --split train --out models/check.json   # check step (E2)
 python vulva/check_view.py eval --model <finder.pth> --check models/check.json --labels <dataset>/labels.csv --split test_newdays
-python tests/test_vulva_pipeline.py                                  # 38 synthetic checks
+python vulva/check_crop.py fit --run <finder run> --labels <dataset>/labels.csv --split train --out models/checkcnn.pth   # check step, CNN on crops (E2b)
+python vulva/check_crop.py eval --model <finder.pth> --check models/checkcnn.pth --labels <dataset>/labels.csv --split test_newdays
+python tests/test_vulva_pipeline.py                                  # 40 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

@@ -1546,6 +1546,139 @@ def test_check_view_learns_tails_from_held_out_candidates():
     finally:
         shutil.rmtree(tmp)
 
+
+def test_crop_check_window_ignores_size_and_position():
+    """check_crop.py: the window is sized to the candidate and centred on it, so a vulva twice as big (or
+    nearer) somewhere else in the frame gives the same crop; crops at the frame edge work; bad layer lists stop."""
+    from check_crop import STORE, WIN, centre, extract_patch, frame_layers, parse_channels, window_for
+    fy, fx = np.mgrid[0:480, 0:640].astype(np.float64)
+    ch = ("ir", "blob")
+    crops = []
+    for x, y, r in ((300, 250, 12), (420, 300, 24)):
+        blob = ((fx - x) / r) ** 2 + ((fy - y) / (1.4 * r)) ** 2 <= 1
+        cx, cy, side = window_for(blob)
+        assert abs(cx - x) < 1 and abs(cy - y) < 1 and abs(side - 3 * 2.8 * r) < 0.1 * side, (cx, cy, side)
+        p = extract_patch(frame_layers(np.where(blob, 40, 110).astype(np.uint8), blob, channels=ch), cx, cy, side, ch)
+        assert p.shape == (2, STORE, STORE)
+        crops.append(centre(p)[1] > 127)
+    a, b = crops
+    assert (a & b).sum() / (a | b).sum() > 0.9
+    assert 0.04 < a.mean() < 0.09, a.mean()           # the vulva fills the same modest share of every window
+    edge = ((fx - 4) / 12) ** 2 + ((fy - 240) / 17) ** 2 <= 1
+    p = extract_patch(frame_layers(np.full((480, 640), 100, np.uint8), edge, channels=ch), *window_for(edge), ch)
+    assert centre(p).shape == (2, WIN, WIN) and centre(p)[1].any()
+    for bad in ("blob,ir", "ir", "ir,blob,colour", "ir,blob,blob"):
+        try:
+            parse_channels(bad)
+        except SystemExit:
+            continue
+        raise AssertionError(f"accepted {bad}")
+
+
+def _stub_finder():
+    """Finder stand-in for the crop check tests: dark IR pixels are vulva, bright ones tail."""
+    import torch
+
+    class Stub(torch.nn.Module):
+        n_out, inputs = 3, "ir"
+
+        def forward(self, x):
+            lg = torch.zeros(x.shape[0], 3, x.shape[2], x.shape[3])
+            lg[:, 0] = 2.0
+            lg[:, 1] = torch.where(x[:, 0] < -1.0, 6.0, -2.0)
+            lg[:, 2] = torch.where(x[:, 0] > 1.0, 6.0, -2.0)
+            return lg
+    return Stub().eval()
+
+
+def _crop_check_set(tmp, n=48, seed=7):
+    """Synthetic frames: a dark oval vulva (radius 10-18 px) and a bright tail band; on half of them the band
+    crosses the vulva (labelled not visible), on the rest it ends above it. Writes the label set and a finder
+    run's held-out probabilities (jobs/fold0.npz, fold1.npz) made by the stub finder."""
+    import torch
+    from seg_model import to_model_space, to_tensor
+    rng = np.random.default_rng(seed)
+    set_dir = os.path.join(tmp, "set")
+    os.makedirs(os.path.join(set_dir, "masks"))
+    os.makedirs(os.path.join(tmp, "run", "jobs"))
+    fy, fx = np.mgrid[0:480, 0:640].astype(np.float64)
+    stub, rows, folds = _stub_finder(), [], {0: ([], []), 1: ([], [])}
+    for i in range(n):
+        pid, real = i % 4, (i // 4) % 2 == 0
+        ts = f"20260210-08-{i // 60:02d}-{i % 60:02d}"
+        folder = os.path.join(set_dir, ts)
+        os.makedirs(folder)
+        x0, y0, r = 320 + rng.uniform(-40, 40), 250 + rng.uniform(-30, 30), rng.uniform(10, 18)
+        vul = ((fx - x0) / r) ** 2 + ((fy - y0) / (1.4 * r)) ** 2 <= 1
+        bx = x0 + rng.uniform(-0.3, 0.3) * r
+        tail = (np.abs(fx - bx) < 0.3 * r) & (fy > y0 - 5 * r) & (fy < (y0 - 2.2 * r if real else y0 + 0.6 * r))
+        ir = np.clip(110 + rng.normal(0, 4, fx.shape), 0, 255)
+        ir[vul], ir[tail] = 40, 200
+        ir = ir.astype(np.uint8)
+        cv2.imwrite(os.path.join(folder, f"pig{pid}_ir_vis_{ts}.jpg"), ir)
+        with open(os.path.join(folder, f"pig{pid}_depth_{ts}.raw"), "wb") as f:
+            f.write(b"\0" * 8)
+            f.write((800 - 8 * vul - 15 * tail).astype(np.uint16).tobytes())
+        row = {"ir_path": f"{ts}/pig{pid}_ir_vis_{ts}.jpg", "mask_path": "", "label": "absent", "pig_id": pid,
+               "timestamp_folder": ts, "pig_timestamp": ts}
+        if real:
+            cv2.imwrite(os.path.join(set_dir, "masks", f"{i}.png"), vul.astype(np.uint8) * 255)
+            row.update(mask_path=f"masks/{i}.png", label="present")
+        rows.append(row)
+        with torch.no_grad():
+            p = torch.softmax(stub(to_tensor(to_model_space(ir)[0])[None]), 1)[0, 1:].numpy().astype(np.float16)
+        folds[0 if pid < 2 else 1][0].append(os.path.join(folder, f"pig{pid}_ir_vis_{ts}.jpg"))
+        folds[0 if pid < 2 else 1][1].append(p)
+    lab = os.path.join(set_dir, "labels.csv")
+    with open(lab, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    for k, (keys, probs) in folds.items():
+        np.savez(os.path.join(tmp, "run", "jobs", f"fold{k}.npz"), keys=np.array(keys), probs=np.stack(probs))
+    return lab, stub
+
+
+def test_crop_check_learns_covered_vulvas_and_evaluates():
+    """check_crop.py fit: one CNN per fold on the held-out candidates learns that a vulva with the tail across
+    it is not a clear view (here from scratch, on synthetic frames); the saved check holds the fold CNNs and
+    the out-of-fold cut. eval: finder + check per frame, size report, mistakes sheet, files written."""
+    from check_crop import check_frames, load_check
+    from eval_seg import read_rows
+    from seg_model import VulvaUNet, save_checkpoint
+    tmp = tempfile.mkdtemp()
+    try:
+        lab, stub = _crop_check_set(tmp)
+        tool = os.path.join(ROOT, "vulva", "check_crop.py")
+        chk_path = os.path.join(tmp, "chk.pth")
+        o = subprocess.run([PY, tool, "fit", "--run", os.path.join(tmp, "run"), "--labels", lab, "--out", chk_path,
+                            "--epochs", "10", "--batch-size", "8", "--no-pretrained", "--precision", "0.9"],
+                           capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stdout[-1500:] + o.stderr[-1500:]
+        models, chk = load_check(chk_path)
+        assert len(models) == 2 and chk["candidates"] == 48 and chk["cv"]["real"] == 24, chk["cv"]
+        assert chk["auc"] >= 0.8 and chk["cv"]["kept_real"] >= 18 and chk["cv"]["kept_false"] <= 3, o.stdout
+        assert "size of the kept real vulvas" in o.stdout
+        with open(os.path.join(tmp, "chk_cv.csv")) as f:
+            assert len(list(csv.DictReader(f))) == 48
+        rows = read_rows(lab)
+        out, errors = check_frames(stub, {"inputs": "ir"}, models, chk, rows, "cpu", sheet=True)
+        assert all(o_["candidate"] for o_ in out)
+        assert all(o_["real"] for o_ in out if o_["label"] == "present")
+        kr = sum(o_["check_keep"] for o_ in out if o_["real"])
+        kf = sum(o_["check_keep"] for o_ in out if not o_["real"])
+        assert kr >= 20 and kf <= 3, (kr, kf)
+        assert all(t.shape == (160, 320, 3) for _, t in errors) and len(errors) == (24 - kr) + kf
+        ck = os.path.join(tmp, "f.pth")
+        save_checkpoint(VulvaUNet(pretrained=False, n_out=3), ck, {"threshold": 0.5, "min_area": 25, "inputs": "ir",
+                                                                    "classes": 3})
+        o = subprocess.run([PY, tool, "eval", "--model", ck, "--check", chk_path, "--labels", lab,
+                            "--out-dir", os.path.join(tmp, "ev")], capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stderr[-1500:]
+        assert "with the crop check" in o.stdout and os.path.exists(os.path.join(tmp, "ev", "check_frames.csv"))
+    finally:
+        shutil.rmtree(tmp)
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):
