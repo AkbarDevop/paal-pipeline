@@ -76,6 +76,24 @@ def relocate_row(r, index):
     return True
 
 
+def split_set(split):
+    """--split value ('train', 'test_newdays,test_newsows', 'all' or '') -> set of names, or None for all."""
+    names = {x.strip() for x in (split or "").split(",") if x.strip()}
+    return None if not names or "all" in names else names
+
+
+def require_split(labels_csvs, split):
+    """A dataset table (build_dataset.py) has a split column: refuse to run without --split, so a
+    test frame can never be trained on (or a training frame scored) by accident."""
+    for p in ([labels_csvs] if isinstance(labels_csvs, str) else labels_csvs):
+        if not os.path.exists(p):
+            continue                      # a missing file is reported where it is read
+        with open(p, newline="", encoding="utf-8-sig") as f:
+            header = next(csv.reader(f), [])
+        if "split" in header and not split:
+            sys.exit(f"{p} has a split column: pass --split (e.g. --split train, or --split test_newdays)")
+
+
 def tail_labels_for(labels_csv):
     """tail_labels.csv next to a labels CSV (label_tail.py) -> {ir_path as written there: (tail 0/1, mask path)}."""
     p = os.path.join(os.path.dirname(os.path.abspath(labels_csv)), "tail_labels.csv")
@@ -90,7 +108,7 @@ def tail_labels_for(labels_csv):
     return out
 
 
-def load_labels(paths, inputs="ir", frames_roots=None, classes=2):
+def load_labels(paths, inputs="ir", frames_roots=None, classes=2, splits=None):
     """Label CSV(s) from make_seg_labels.py or label_ellipse.py. Relative paths are
     resolved against each CSV's folder, so a label set can move between computers; with
     frames_roots, frames not found there are looked up by timestamp folder, so labels.csv +
@@ -109,7 +127,8 @@ def load_labels(paths, inputs="ir", frames_roots=None, classes=2):
             return p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(b, p)
 
         with open(path, newline="", encoding="utf-8-sig") as f:
-            rows = [r for r in csv.DictReader(f) if r["label"] in ("present", "absent")]
+            rows = [r for r in csv.DictReader(f) if r["label"] in ("present", "absent")
+                    and (splits is None or r.get("split") in splits)]
         tails = tail_labels_for(path) if classes == 3 else {}
         for r in rows:
             tail = tails.get(r["ir_path"])
@@ -376,6 +395,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--labels", nargs="+", default=[os.path.join("labels", "vulva_seg_labels.csv")],
                     help="one or more label CSVs (e.g. February + January), trained on together")
+    ap.add_argument("--split", default="", help="for a dataset table (build_dataset.py): the split(s) to train on, "
+                    "comma-separated, e.g. train")
     ap.add_argument("--labels-from", default="",
                     help="seg_report.json of an earlier run: train on exactly its label files (fair comparisons)")
     ap.add_argument("--frames-root", default="",
@@ -415,7 +436,9 @@ def main():
     args = ap.parse_args()
     if args.labels_from:
         with open(args.labels_from) as f:
-            args.labels = json.load(f)["labels"]
+            prev = json.load(f)
+        args.labels = prev["labels"]
+        args.split = args.split or prev.get("split", "")
     if args.presence_precision is None:
         args.presence_precision = 0.0 if args.classes == 3 else 0.9
     global SCALE_AUG
@@ -425,6 +448,7 @@ def main():
         return run_job(args)
     if args.rescore:
         return rescore(args)
+    require_split(args.labels, args.split)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -438,7 +462,7 @@ def main():
         log_lines.append(s)
 
     t0 = time.time()
-    items = load_labels(args.labels, args.inputs, args.frames_roots, args.classes)
+    items = load_labels(args.labels, args.inputs, args.frames_roots, args.classes, split_set(args.split))
     pigs = sorted({it["pig_id"] for it in items})
     n_pos = int(sum(has_vulva(it) for it in items))
     log(f"{len(items)} frames from {len(pigs)} sows: {n_pos} with a vulva mask, {len(items) - n_pos} without"
@@ -449,7 +473,7 @@ def main():
     if n_pos == 0:
         sys.exit("No vulva masks found; check --labels and the mask paths.")
 
-    report = {"labels": args.labels, "frames": len(items), "present": n_pos, "sows": pigs,
+    report = {"labels": args.labels, "split": args.split, "frames": len(items), "present": n_pos, "sows": pigs,
               "epochs": args.epochs, "device": device, "inputs": args.inputs, "scale_aug": args.scale_aug,
               "classes": args.classes}
     if args.folds and len(pigs) >= args.folds:
@@ -546,7 +570,7 @@ def run_job(args):
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     log = lambda s: print(s, flush=True)  # noqa: E731
     items = load_items(args.items_cache) if args.items_cache else load_labels(args.labels, args.inputs,
-                                                                               args.frames_roots, args.classes)
+                                                                               args.frames_roots, args.classes, split_set(args.split))
     if k == args.folds:
         log(f"Final model on all {len(items)} frames ({device})")
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
@@ -577,7 +601,8 @@ def run_parallel(args, items, folds, report, log):
            "--epochs", str(args.epochs), "--batch-size", str(args.batch_size), "--lr", str(args.lr),
            "--pos-weight", str(args.pos_weight), "--inputs", args.inputs, "--seed", str(args.seed),
            "--job-dir", job_dir, "--scale-aug", args.scale_aug, "--classes", str(args.classes),
-           "--presence-precision", str(args.presence_precision)] + (["--no-pretrained"] if args.no_pretrained else [])
+           "--presence-precision", str(args.presence_precision)] + (["--no-pretrained"] if args.no_pretrained else []) \
+        + (["--split", args.split] if args.split else [])
     cache = os.path.join(job_dir, "items.npz")    # the frames as loaded here: workers do not touch the share
     save_items(items, cache)
     cmd += ["--items-cache", cache]

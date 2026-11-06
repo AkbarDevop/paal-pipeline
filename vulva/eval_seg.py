@@ -43,6 +43,7 @@ from measure3d import load_depth_raw, load_intrinsics, measure  # noqa: E402
 from rgb_align import register  # noqa: E402
 from keep_rule import keep, rule_from_checkpoint  # noqa: E402
 from seg_model import default_depth_path, ir_channel, load_checkpoint, predict_parts, read_input, read_mask  # noqa: E402
+from train_seg import require_split, split_set  # noqa: E402
 
 FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "note", "how", "verdict", "model_visible",
           "model_visible_before_cut", "blob_conf", "iou", "human_width_mm", "model_width_mm",
@@ -53,14 +54,15 @@ ORDER = {"false alarm": 0, "missed": 1, "dropped by cut": 2, "dropped (covered b
          "both not visible": 4}
 
 
-def read_rows(labels_csv, frames_roots=None):
+def read_rows(labels_csv, frames_roots=None, splits=None):
     from select_frames import index_folders
     from train_seg import relocate_row
     index = index_folders(frames_roots) if frames_roots else {}
     base = os.path.dirname(os.path.abspath(labels_csv))
     res = lambda p: p if (not p or os.path.isabs(p) or p.startswith("\\\\")) else os.path.join(base, p)  # noqa: E731
     with open(labels_csv, newline="", encoding="utf-8-sig") as f:
-        rows = [r for r in csv.DictReader(f) if r.get("label") in ("present", "absent")]
+        rows = [r for r in csv.DictReader(f) if r.get("label") in ("present", "absent")
+                and (splits is None or r.get("split") in splits)]
     colour = {}                                   # colour images listed in the set's label_set.csv
     ls = os.path.join(base, "label_set.csv")
     if os.path.exists(ls):
@@ -274,18 +276,21 @@ def main():
     ap.add_argument("--ir-sheet", action="store_true", help="draw the sheet on the IR image even if colour exists")
     ap.add_argument("--frames-root", default="",
                     help="';'-separated raw folders, for labelled frames whose images are not next to the labels")
+    ap.add_argument("--split", default="", help="for a dataset table (build_dataset.py): which split(s) to score, "
+                    "comma-separated, e.g. test_newdays")
     args = ap.parse_args()
+    require_split(args.labels, args.split)
 
     name = os.path.splitext(os.path.basename(args.model))[0]
     out_dir = args.out_dir or os.path.join("outputs", f"eval_{name}")
     os.makedirs(out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     model, ckpt = load_checkpoint(args.model, device)
-    rows = read_rows(args.labels, [r for r in args.frames_root.split(";") if r.strip()])
+    rows = read_rows(args.labels, [r for r in args.frames_root.split(";") if r.strip()], split_set(args.split))
     if not rows:
         sys.exit(f"No labelled frames in {args.labels}")
     frames = evaluate(model, ckpt, rows, device, load_intrinsics(args.calibration))
-    lines = [f"Model {args.model} on {args.labels}"] + summarise(frames, rule_from_checkpoint(ckpt))
+    lines = [f"Model {args.model} on {args.labels}" + (f" (split {args.split})" if args.split else "")] + summarise(frames, rule_from_checkpoint(ckpt))
     print("\n".join(lines))
     with open(os.path.join(out_dir, "eval_report.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")

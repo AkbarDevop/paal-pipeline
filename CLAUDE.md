@@ -36,7 +36,10 @@ python vulva/import_cvat.py <export.zip> <set> --who lucas            # CVAT exp
 python vulva/compare_labels.py <ref.csv> <set>/labels_lucas.csv --manifest <set>/manifest.csv   # human agreement
 python vulva/depth_outline.py <labels.csv> --n 20 --out outputs/depth_outline_look   # paper-style bump outline from depth, sheets
 python vulva/train_seg.py --labels-from <run>/seg_report.json --classes 3 --inputs fusion   # IR + depth (5 channels); --inputs depth = depth only
-python tests/test_vulva_pipeline.py                                  # 35 synthetic checks
+python vulva/inventory_raw.py <raw roots>                            # what raw data exists: passes per month and day, night, gaps
+python vulva/build_dataset.py <out> --train-from <run>/seg_report.json --add test_newdays feb12 <labels.csv>   # dataset v1: one table, split column, leak checks
+python vulva/train_seg.py --labels <dataset>/labels.csv --split train   # eval_seg.py ... --split test_newdays
+python tests/test_vulva_pipeline.py                                  # 37 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

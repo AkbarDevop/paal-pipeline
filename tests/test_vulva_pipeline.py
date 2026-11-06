@@ -1358,6 +1358,119 @@ def test_depth_outline_finds_the_bump_like_the_paper():
     res_c = depth_outline(frame(), ell(0.6))
     assert res_c["status"] == "ok" and res_c["clipped"] > 0.3, res_c["clipped"]
 
+
+def test_build_dataset_splits_leak_checks_and_split_guard():
+    """build_dataset.py: label sets become one dataset (copies + one table with a split column,
+    tails and colour carried over); a frame or an animal-day in both train and test stops the
+    build; train_seg / eval_seg refuse a split table without --split and use only that split."""
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(11)
+
+        def make_set(name, frames, tail_for=None):
+            d = os.path.join(tmp, name)
+            os.makedirs(os.path.join(d, "masks"))
+            rows = []
+            for pid, ts in frames:
+                folder = ts[:9] + "00-00-00"
+                os.makedirs(os.path.join(d, folder), exist_ok=True)
+                m = _write_frame(os.path.join(d, folder), pid, ts, True, rng)
+                mp = f"masks/{pid}_{ts}.png"
+                cv2.imwrite(os.path.join(d, mp), m.astype(np.uint8) * 255)
+                cv2.imwrite(os.path.join(d, folder, f"pig{pid}_rgbreg_{ts}.jpg"), np.full((480, 640, 3), 99, np.uint8))
+                rows.append({"ir_path": f"{folder}/pig{pid}_ir_vis_{ts}.jpg", "mask_path": mp, "label": "present",
+                             "pig_id": pid, "timestamp_folder": folder, "pig_timestamp": ts, "how": "hand"})
+            with open(os.path.join(d, "labels.csv"), "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                w.writeheader()
+                w.writerows(rows)
+            if tail_for is not None:
+                r = rows[tail_for]
+                os.makedirs(os.path.join(d, "tail_masks"))
+                cv2.imwrite(os.path.join(d, "tail_masks", "t.png"), np.zeros((480, 640), np.uint8))
+                with open(os.path.join(d, "tail_labels.csv"), "w", newline="") as f:
+                    f.write("ir_path,pig_id,timestamp_folder,pig_timestamp,tail,tail_mask_path,covers_vulva,how,width_px,date\n")
+                    f.write(f"{r['ir_path']},{r['pig_id']},{r['timestamp_folder']},{r['pig_timestamp']},1,"
+                            f"tail_masks/t.png,0,stroke,8,2026-11-05\n")
+            return os.path.join(d, "labels.csv")
+
+        tr = make_set("feb_train", [(0, "20260210-08-00-01"), (1, "20260210-08-00-02"), (0, "20260211-08-00-01")], 0)
+        te = make_set("feb_test", [(0, "20260213-08-00-01"), (2, "20260213-14-00-02")])
+        bad = make_set("bad_test", [(1, "20260210-15-00-05")])                  # sow 1 on a training day
+        tool = os.path.join(ROOT, "vulva", "build_dataset.py")
+        ds = os.path.join(tmp, "ds")
+        out = subprocess.run([PY, tool, ds, "--add", "train", "feb", tr, "--add", "test_newdays", "feb12", te],
+                             capture_output=True, text=True, cwd=tmp)
+        assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+        with open(os.path.join(ds, "labels.csv")) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 5 and {r["split"] for r in rows} == {"train", "test_newdays"}
+        assert all(os.path.exists(os.path.join(ds, r["ir_path"])) and os.path.exists(os.path.join(ds, r["mask_path"]))
+                   and os.path.exists(os.path.join(ds, r["depth_path"])) for r in rows)
+        assert {r["animal_id"] for r in rows} == {"b2_s00", "b2_s01", "b2_s02"}
+        with open(os.path.join(ds, "tail_labels.csv")) as f:
+            tails = list(csv.DictReader(f))
+        assert len(tails) == 1 and os.path.exists(os.path.join(ds, tails[0]["tail_mask_path"]))
+        with open(os.path.join(ds, "label_set.csv")) as f:
+            assert len(list(csv.DictReader(f))) == 5
+        assert os.path.exists(os.path.join(ds, "README.md")) and "no animal-day" in out.stdout
+        rep = os.path.join(tmp, "seg_report.json")                # train split taken from a run's report
+        with open(rep, "w") as f:
+            json.dump({"labels": [tr]}, f)
+        o = subprocess.run([PY, tool, os.path.join(tmp, "ds2"), "--train-from", rep, "--add", "test_newdays", "feb12", te],
+                           capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0 and "train <- feb_train (3)" in o.stdout, o.stdout[-1500:]
+        # leaks stop the build: the same frame in two splits, or an animal on a training day
+        for extra in (["--add", "test_newsows", "dup", tr], ["--add", "test_newsows", "bad", bad]):
+            o = subprocess.run([PY, tool, os.path.join(tmp, "ds_bad"), "--add", "train", "feb", tr] + extra,
+                               capture_output=True, text=True, cwd=tmp)
+            assert o.returncode != 0 and "Not built" in o.stderr, o.stdout[-1500:]
+        assert not os.path.exists(os.path.join(tmp, "ds_bad", "labels.csv"))
+        # train / eval by split; without --split they refuse
+        lab = os.path.join(ds, "labels.csv")
+        trainer = [PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels", lab, "--folds", "0", "--epochs", "1",
+                   "--no-pretrained", "--out-model", os.path.join(tmp, "m.pth"), "--out-dir", os.path.join(tmp, "seg")]
+        o = subprocess.run(trainer, capture_output=True, text=True, cwd=tmp)
+        assert o.returncode != 0 and "--split" in o.stderr
+        o = subprocess.run(trainer + ["--split", "train"], capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stderr[-2000:]
+        assert "3 frames from" in o.stdout, o.stdout[-800:]
+        ev = [PY, os.path.join(ROOT, "vulva", "eval_seg.py"), "--model", os.path.join(tmp, "m.pth"), "--labels", lab,
+              "--out-dir", os.path.join(tmp, "ev")]
+        assert subprocess.run(ev, capture_output=True, text=True, cwd=tmp).returncode != 0
+        o = subprocess.run(ev + ["--split", "test_newdays"], capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stderr[-2000:]
+        assert "(split test_newdays)" in o.stdout and "2 labelled frames" in o.stdout, o.stdout[:600]
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_inventory_raw_counts_passes_months_night_and_gaps():
+    """inventory_raw.py: timestamp folders (also one level down) counted by month and day, with
+    night passes, sow images per day and the days without any pass."""
+    tmp = tempfile.mkdtemp()
+    try:
+        root = os.path.join(tmp, "Pictures_OAK")
+        for name in ["20260130-08-00-00", "20260130-22-10-00", "20260201-09-00-00", "OAK_feb/20260204-03-00-00"]:
+            d = os.path.join(root, name)
+            os.makedirs(d)
+            for pid in range(3):
+                open(os.path.join(d, f"pig{pid}_ir_vis_{os.path.basename(name)}.jpg"), "wb").close()
+            open(os.path.join(d, "pig0_depth_x.raw"), "wb").close()
+        out_csv = os.path.join(tmp, "inv.csv")
+        o = subprocess.run([PY, os.path.join(ROOT, "vulva", "inventory_raw.py"), root, "--out", out_csv],
+                           capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stderr[-1500:]
+        assert "4 robot passes on 3 days" in o.stdout, o.stdout
+        assert "2026-01      1       2             1           6" in o.stdout, o.stdout
+        assert "01-31" in o.stdout and "02-02 to 02-03" in o.stdout, o.stdout
+        with open(out_csv) as f:
+            rows = {r["date"]: r for r in csv.DictReader(f)}
+        assert rows["20260204"]["night_passes"] == "1" and rows["20260130"]["sow_images"] == "6"
+        assert rows["20260130"]["highest_stall"] == "2"
+    finally:
+        shutil.rmtree(tmp)
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):
