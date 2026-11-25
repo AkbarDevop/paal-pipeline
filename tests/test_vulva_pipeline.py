@@ -1801,6 +1801,47 @@ def test_init_from_starts_a_model_from_a_checkpoint_and_ir_into_fusion():
         shutil.rmtree(tmp)
 
 
+def test_seed_table_means_spreads_and_differences():
+    """seed_table.py: eval folders named eval_<recipe>_s<seed>_<split> -> per recipe and test the mean and spread
+    over seeds, and the difference against the reference recipe next to the larger spread."""
+    import seed_table
+    tmp = tempfile.mkdtemp()
+    try:
+        vals = {("ir", 42, "test_newdays"): (0.938, 0.382), ("ir", 1, "test_newdays"): (0.930, 0.370),
+                ("ir", 2, "test_newdays"): (0.934, 0.378), ("pre_ir", 42, "test_newdays"): (0.940, 0.400),
+                ("pre_ir", 1, "test_newdays"): (0.936, 0.396), ("ir", 42, "test_newsows"): (0.540, 0.098),
+                ("fusion", 42, "test_newdays"): (0.925, 0.397), ("pre_fusion", 42, "test_newdays"): (0.930, 0.390)}
+        for (recipe, seed, split), (m50, m5095) in vals.items():
+            d = os.path.join(tmp, f"eval_{recipe}_s{seed}_{split}")
+            os.makedirs(d)
+            with open(os.path.join(d, "eval_report.txt"), "w") as f:
+                f.write(f"148 labelled frames\nMask mAP50 {m50:.3f}, mAP50-95 {m5095:.3f}  (every outline drawn, "
+                        f"ranked by confidence; AP at IoU 0.75 0.180, at 0.90 0.000)\n"
+                        f"Outline on frames both call visible (90): IoU mean 0.700, median 0.710\n")
+        os.makedirs(os.path.join(tmp, "eval_r10_feb"))                  # not in the naming scheme: ignored
+        old = sys.argv
+        sys.argv = ["seed_table.py", tmp, "--copy-to", os.path.join(tmp, "share")]
+        try:
+            s = seed_table.main()
+        finally:
+            sys.argv = old
+        ir, pre = s["test_newdays"]["ir"], s["test_newdays"]["pre_ir"]
+        assert ir["seeds"] == [1, 2, 42] and pre["seeds"] == [1, 42]
+        assert abs(ir["map50_95_mean"] - 0.37667) < 1e-4 and abs(ir["map50_95_spread"] - 0.012) < 1e-9
+        assert abs(pre["map50_95_diff"] - (0.398 - 0.37667)) < 1e-4 and abs(pre["map50_95_noise"] - 0.012) < 1e-9
+        assert "map50_95_diff" not in ir and s["test_newsows"]["ir"]["seeds"] == [42]
+        fus, pfus = s["test_newdays"]["fusion"], s["test_newdays"]["pre_fusion"]
+        assert pre["vs"] == "ir" and fus["vs"] == "ir" and pfus["vs"] == "fusion"      # pre_X against X
+        assert abs(pfus["map50_95_diff"] + 0.007) < 1e-9
+        with open(os.path.join(tmp, "seed_table.csv")) as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 8 and {r["ap75"] for r in rows} == {"0.18"} and rows[0]["iou_mean"] == "0.7"
+        assert os.path.exists(os.path.join(tmp, "share", "seed_table.txt"))
+        assert os.path.exists(os.path.join(tmp, "share", "eval_pre_ir_s1_test_newdays", "eval_report.txt"))
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):
