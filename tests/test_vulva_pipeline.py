@@ -1679,6 +1679,128 @@ def test_crop_check_learns_covered_vulvas_and_evaluates():
     finally:
         shutil.rmtree(tmp)
 
+def _roboflow_zip(path):
+    """A small COCO Segmentation export shaped like Roboflow's vulva_seg: 480 x 480 colour images; per image a
+    vulva outline, a rectangle around the same vulva and a tail rectangle; one image with a tail only, one with
+    a vulva rectangle only."""
+    import zipfile
+    imgs, anns, aid = [], [], 0
+    zf = zipfile.ZipFile(path, "w")
+    yy, xx = np.mgrid[0:480, 0:480]
+    for i, (name, kinds) in enumerate([("131_2022_8_16_8_22_19.png", "orv"), ("143_2022_8_9_9_41_26.png", "orv"),
+                                       ("129_2022_7_31_9_0_19.png", "t"), ("144_2022_8_4_10_41_1.png", "r")]):
+        img = np.full((480, 480, 3), (200, 180, 190), np.uint8)
+        cx, cy = 240 + 10 * i, 250
+        img[((xx - cx) / 11) ** 2 + ((yy - cy) / 16) ** 2 <= 1] = (90, 60, 120)
+        fn = name.replace(".png", "_png.rf.abc%d.jpg" % i)
+        zf.writestr("train/" + fn, cv2.imencode(".jpg", img)[1].tobytes())
+        imgs.append({"id": i, "file_name": fn, "width": 480, "height": 480, "extra": {"name": name}})
+        if "o" in kinds:
+            t = np.linspace(0, 2 * np.pi, 24, endpoint=False)
+            poly = np.ravel(np.column_stack([cx + 11 * np.cos(t), cy + 16 * np.sin(t)])).round(1).tolist()
+            aid += 1
+            anns.append({"id": aid, "image_id": i, "category_id": 2, "segmentation": [poly], "bbox": [cx - 11, cy - 16, 22, 32]})
+        if "r" in kinds:
+            aid += 1
+            anns.append({"id": aid, "image_id": i, "category_id": 2, "bbox": [cx - 12, cy - 17, 24, 34],
+                         "segmentation": [[cx - 12, cy + 17, cx + 12, cy + 17, cx + 12, cy - 17, cx - 12, cy - 17, cx - 12, cy + 17]]})
+        if "t" in kinds or "v" in kinds:
+            aid += 1
+            anns.append({"id": aid, "image_id": i, "category_id": 1, "bbox": [cx - 10, cy - 70, 20, 50],
+                         "segmentation": [[cx - 10, cy - 20, cx + 10, cy - 20, cx + 10, cy - 70, cx - 10, cy - 70, cx - 10, cy - 20]]})
+    cats = [{"id": 0, "name": "vulva", "supercategory": "none"}, {"id": 1, "name": "tail", "supercategory": "vulva"},
+            {"id": 2, "name": "vulva", "supercategory": "vulva"}]
+    zf.writestr("train/_annotations.coco.json", json.dumps({"images": imgs, "annotations": anns, "categories": cats}))
+    zf.close()
+
+
+def test_import_roboflow_keeps_outlines_drops_rectangles_and_matches_our_frames():
+    """import_roboflow.py: from a COCO Segmentation export it keeps the vulva outlines and drops every rectangle
+    (the duplicate vulva boxes and the tail boxes) and the images without an outline; writes grey 640 x 480
+    frames with OAK names, the median vulva placed where ours sit and zoomed, masks from the outlines, a
+    labels.csv train_seg.py reads (ear tag as sow) and a sheet for checking the outlines by eye."""
+    from import_roboflow import OUR_CENTRE, is_rectangle, parse_name
+    assert is_rectangle([1, 1, 5, 1, 5, 9, 1, 9, 1, 1]) and not is_rectangle([1, 1, 5, 2, 4, 9])
+    assert parse_name("131_2022_8_16_8_22_19.png") == (131, "20220816-08-22-19") and parse_name("x.png") is None
+    tmp = tempfile.mkdtemp()
+    try:
+        zp = os.path.join(tmp, "vulva_seg.coco-segmentation.zip")
+        _roboflow_zip(zp)
+        out = os.path.join(tmp, "set")
+        o = subprocess.run([PY, os.path.join(ROOT, "vulva", "import_roboflow.py"), zp, out, "--zoom", "1.5"],
+                           capture_output=True, text=True)
+        assert o.returncode == 0, o.stdout[-1500:] + o.stderr[-1500:]
+        assert "2 with a vulva outline, 2 without" in o.stdout and "3 vulva rectangles" in o.stdout, o.stdout
+        with open(os.path.join(out, "labels.csv")) as f:
+            rows = list(csv.DictReader(f))
+        assert [(r["pig_id"], r["ir_path"]) for r in rows] == [
+            ("131", "20220816-08-22-19/pig131_ir_vis_20220816-08-22-19.jpg"),
+            ("143", "20220809-09-41-26/pig143_ir_vis_20220809-09-41-26.jpg")]
+        img = cv2.imread(os.path.join(out, rows[0]["ir_path"]), cv2.IMREAD_UNCHANGED)
+        assert img.shape == (480, 640)                                  # grey, our frame size
+        areas, centres = [], []
+        for r in rows:
+            m = cv2.imread(os.path.join(out, r["mask_path"]), cv2.IMREAD_GRAYSCALE) > 0
+            ys, xs = np.nonzero(m)
+            areas.append(m.sum())
+            centres.append((xs.mean(), ys.mean()))
+        assert all(abs(a / (np.pi * 11 * 16 * 1.5 ** 2) - 1) < 0.15 for a in areas), areas
+        mid = np.mean(centres, 0)
+        assert abs(mid[0] - OUR_CENTRE[0]) < 3 and abs(mid[1] - OUR_CENTRE[1]) < 3, mid
+        assert abs((centres[1][0] - centres[0][0]) - 15) < 2           # 10 px apart in theirs, x1.5 in ours
+        assert os.path.exists(os.path.join(out, "outline_sheet.jpg"))
+        from train_seg import load_labels
+        items = load_labels(os.path.join(out, "labels.csv"), classes=3)
+        assert len(items) == 2 and all(not it["tail_known"] and (it["mask"] == 1).any() for it in items)
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_init_from_starts_a_model_from_a_checkpoint_and_ir_into_fusion():
+    """train_seg.py --init-from: every model starts from a checkpoint (e.g. pretrained on the Roboflow set) instead
+    of ImageNet: same-shape layers are copied; an IR checkpoint fills a fusion model's IR input channels and
+    leaves its depth channels at zero; the run records where it started."""
+    import torch
+    from seg_model import VulvaUNet, load_checkpoint, load_initial_weights, save_checkpoint
+    tmp = tempfile.mkdtemp()
+    try:
+        src = VulvaUNet(pretrained=False, n_out=3, in_ch=3)
+        ck = os.path.join(tmp, "pre.pth")
+        save_checkpoint(src, ck, {"threshold": 0.5, "min_area": 25, "inputs": "ir", "classes": 3})
+        same = VulvaUNet(pretrained=False, n_out=3, in_ch=3)
+        msg = load_initial_weights(same, ck)
+        assert "copied" in msg and all(torch.equal(a, b) for a, b in zip(src.state_dict().values(), same.state_dict().values()))
+        fus = VulvaUNet(pretrained=False, n_out=3, in_ch=5)
+        msg = load_initial_weights(fus, ck)
+        w = fus.stem[0].weight
+        assert torch.equal(w[:, :3], src.stem[0].weight) and float(w[:, 3:].detach().abs().sum()) == 0, msg
+        assert torch.equal(fus.l4[0].conv1.weight, src.l4[0].conv1.weight) and "first 3 input channels" in msg
+        zp = os.path.join(tmp, "rf.zip")
+        _roboflow_zip(zp)
+        rf = os.path.join(tmp, "rf")
+        subprocess.run([PY, os.path.join(ROOT, "vulva", "import_roboflow.py"), zp, rf, "--sheet", "0"],
+                       check=True, capture_output=True)
+        lab = os.path.join(rf, "labels.csv")
+        base = [PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels", lab, "--classes", "3", "--folds", "0",
+                "--epochs", "1", "--batch-size", "2", "--no-pretrained"]
+        pre = os.path.join(tmp, "models", "pre_rf.pth")
+        o = subprocess.run(base + ["--out-model", pre, "--out-dir", os.path.join(tmp, "o1")], capture_output=True,
+                           text=True, cwd=tmp)
+        assert o.returncode == 0, o.stdout[-1500:] + o.stderr[-1500:]
+        fine = os.path.join(tmp, "models", "fine.pth")
+        o = subprocess.run(base + ["--init-from", pre, "--out-model", fine, "--out-dir", os.path.join(tmp, "o2")],
+                           capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0 and "started from" in o.stdout, o.stdout[-1500:] + o.stderr[-1500:]
+        assert load_checkpoint(fine)[1]["init_from"] == pre
+        with open(os.path.join(tmp, "o2", "seg_report.json")) as f:
+            assert json.load(f)["init_from"] == pre
+        o = subprocess.run(base + ["--init-from", os.path.join(tmp, "missing.pth"), "--out-model", fine],
+                           capture_output=True, text=True, cwd=tmp)
+        assert o.returncode != 0 and "not found" in (o.stdout + o.stderr)
+    finally:
+        shutil.rmtree(tmp)
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted((n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)):

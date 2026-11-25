@@ -273,6 +273,39 @@ def n_out_for(ckpt):
     return 3 if int(ckpt.get("classes", 2)) == 3 else 1
 
 
+def load_initial_weights(model, path):
+    """Start a model from an earlier checkpoint (e.g. one pretrained on another data set) instead of
+    ImageNet. Layers whose shape matches are copied. The first layer may differ in input channels: an IR
+    checkpoint (3 channels) into a fusion model (5) copies the IR filters and leaves the depth filters at
+    zero, as when starting from ImageNet. -> one line saying what was copied."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    src = ckpt.get("state_dict", ckpt)
+    dst = model.state_dict()
+    copied, partial, skipped = 0, [], []
+    with torch.no_grad():
+        for name, t in dst.items():
+            s = src.get(name)
+            if s is None:
+                skipped.append(name)
+            elif s.shape == t.shape:
+                t.copy_(s)
+                copied += 1
+            elif t.ndim == 4 and s.ndim == 4 and s.shape[0] == t.shape[0] and s.shape[2:] == t.shape[2:] \
+                    and s.shape[1] < t.shape[1]:
+                t.zero_()
+                t[:, :s.shape[1]] = s
+                partial.append(name)
+            else:
+                skipped.append(name)
+    model.load_state_dict(dst)
+    msg = f"started from {path}: {copied} layers copied"
+    if partial:
+        msg += f", {', '.join(partial)} copied into the first {src[partial[0]].shape[1]} input channels (rest zero)"
+    if skipped:
+        msg += f", {len(skipped)} left as they were ({', '.join(skipped[:3])}{', ...' if len(skipped) > 3 else ''})"
+    return msg
+
+
 def load_checkpoint(path, device="cpu"):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     inputs = ckpt.get("inputs", "ir")

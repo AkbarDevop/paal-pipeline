@@ -44,7 +44,9 @@ python vulva/check_view.py fit --run <finder run> --labels <dataset>/labels.csv 
 python vulva/check_view.py eval --model <finder.pth> --check models/check.json --labels <dataset>/labels.csv --split test_newdays
 python vulva/check_crop.py fit --run <finder run> --labels <dataset>/labels.csv --split train --out models/checkcnn.pth   # check step, CNN on crops (E2b)
 python vulva/check_crop.py eval --model <finder.pth> --check models/checkcnn.pth --labels <dataset>/labels.csv --split test_newdays
-python tests/test_vulva_pipeline.py                                  # 40 synthetic checks
+python vulva/import_roboflow.py <vulva_seg coco-segmentation.zip> <set>   # 2022 Roboflow outlines -> grey OAK-like label set (pretraining)
+python vulva/train_seg.py --labels <set>/labels.csv --classes 3 --out-model models/vulva_pre_roboflow.pth   # pretrain; then --init-from it to fine-tune
+python tests/test_vulva_pipeline.py                                  # 42 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)
