@@ -15,6 +15,8 @@ Six trainings share the GPU at a time, as r10 and r11 did (about 1.5 h in all), 
 Results: outputs\seeds\seed_table.txt, copied to the Mac share (\\tsclient\paal_exchange\seeds).
 If it stops (PC needed, disconnect), run it again: finished models and scores are kept and skipped.
 -NoFusionPretrain leaves out the three pre_fusion models (about 30 min less).
+Python: the one that has torch with CUDA is found by itself (an active venv or conda env, .venv / venv in the
+repo or in a folder under your user folder, then python / py on the path); -Python <python.exe> picks one.
 #>
 param(
     [string]$Data = "C:\Users\aakdbx\vulva_dataset_v1\labels.csv",
@@ -25,20 +27,51 @@ param(
     [string]$Out = "outputs\seeds",
     [string]$CopyTo = "\\tsclient\paal_exchange\seeds",
     [int]$AtOnce = 6,
-    [switch]$NoFusionPretrain
+    [switch]$NoFusionPretrain,
+    [string]$Python = ""
 )
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"           # python writes warnings to stderr; failures are checked by hand below
 $t0 = Get-Date
 
 # ---------- inputs ----------
 if (-not (Test-Path "vulva\train_seg.py")) { throw "Run this from the repo root (the folder that holds vulva\)." }
 if (-not (Test-Path $Data)) { throw "Dataset table not found: $Data (pass -Data <labels.csv>)" }
 if (-not (Test-Path $R10)) { throw "r10 not found: $R10 (pass -R10 <path>)" }
+# ---------- which Python: the one with torch and CUDA (the venv r10 and r11 were trained in) ----------
+function Get-TorchInfo($exe) {
+    try { $o = & $exe -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())" 2>$null }
+    catch { return $null }
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return "$o".Trim()
+}
+$cands = @()
+if ($Python) { $cands += $Python }
+if ($env:VIRTUAL_ENV) { $cands += "$env:VIRTUAL_ENV\Scripts\python.exe" }
+if ($env:CONDA_PREFIX) { $cands += "$env:CONDA_PREFIX\python.exe" }
+foreach ($v in @(".venv", "venv", "env")) { $cands += "$($PWD.Path)\$v\Scripts\python.exe" }
+foreach ($d in (Get-ChildItem $HOME -Directory -ErrorAction SilentlyContinue)) {
+    $cands += "$($d.FullName)\Scripts\python.exe"
+    foreach ($v in @(".venv", "venv", "env")) { $cands += "$($d.FullName)\$v\Scripts\python.exe" }
+    foreach ($e in (Get-ChildItem "$($d.FullName)\envs" -Directory -ErrorAction SilentlyContinue)) { $cands += "$($e.FullName)\python.exe" }
+}
+$cands += @("python", "py")
+$Py = $null; $cpuOnly = $null
+foreach ($c in ($cands | Select-Object -Unique)) {
+    if ($c -match "\\" -and -not (Test-Path $c)) { continue }
+    $info = Get-TorchInfo $c
+    if (-not $info) { continue }
+    if ($info -match "cuda True") { $Py = $c; Write-Host "Python: $c ($info)"; break }
+    if (-not $cpuOnly) { $cpuOnly = "$c ($info)" }
+}
+if (-not $Py) {
+    if ($cpuOnly) { throw "Only a Python without CUDA was found: $cpuOnly. Training 10 models on the CPU would take days. Activate the venv you trained r10 in, or pass -Python <path to its python.exe>." }
+    throw "No Python with torch found. Activate the venv you trained r10 in (its prompt starts with its name), or pass -Python <path to its python.exe>."
+}
+
 function Get-Inputs($path) {
-    $v = python -c "import sys, torch; print(torch.load(sys.argv[1], map_location='cpu', weights_only=False).get('inputs', 'ir'))" $path
+    $v = & $Py -c "import sys, torch; print(torch.load(sys.argv[1], map_location='cpu', weights_only=False).get('inputs', 'ir'))" $path
     return "$v".Trim()
 }
-$ErrorActionPreference = "Continue"           # python writes warnings to stderr; failures are checked by hand below
 if (-not $R11) {                              # r11 = the fusion model trained on r10's frames
     foreach ($c in (Get-ChildItem models -Filter "vulva_seg_r11*.pth")) {
         if ((Get-Inputs ("models\" + $c.Name)) -eq "fusion") { $R11 = "models\" + $c.Name; break }
@@ -50,12 +83,12 @@ if (-not (Test-Path $Pre)) {
     if (-not (Test-Path $PreShare)) { throw "Roboflow model not found: $Pre, nor on the share: $PreShare" }
     Write-Host "Copying the Roboflow-pretrained model from the Mac share ..."
     # plain read/write: PowerShell Copy-Item is refused on \\tsclient
-    python -c "import shutil, sys; shutil.copyfileobj(open(sys.argv[1], 'rb'), open(sys.argv[2], 'wb'))" $PreShare $Pre
+    & $Py -c "import shutil, sys; shutil.copyfileobj(open(sys.argv[1], 'rb'), open(sys.argv[2], 'wb'))" $PreShare $Pre
     if (-not (Test-Path $Pre)) { throw "copy failed: $Pre" }
 }
 
 function Show-Meta($path) {
-    python -c "import sys, torch; c = torch.load(sys.argv[1], map_location='cpu', weights_only=False); print('  %-45s inputs %-6s classes %s  zoom %s  frames %s' % (sys.argv[1], c.get('inputs', 'ir'), c.get('classes', 2), c.get('scale_aug', ''), c.get('trained_on', '')))" $path
+    & $Py -c "import sys, torch; c = torch.load(sys.argv[1], map_location='cpu', weights_only=False); print('  %-45s inputs %-6s classes %s  zoom %s  frames %s' % (sys.argv[1], c.get('inputs', 'ir'), c.get('classes', 2), c.get('scale_aug', ''), c.get('trained_on', '')))" $path
 }
 Write-Host "Starting points (check: r10 = ir, r11 = fusion, both classes 3):"
 Show-Meta $R10; Show-Meta $R11; Show-Meta $Pre
@@ -78,7 +111,7 @@ function Invoke-Queue($items, [int]$n) {
     $running = New-Object System.Collections.ArrayList
     foreach ($it in $items) {
         while (@($running | Where-Object { -not $_.P.HasExited }).Count -ge $n) { Start-Sleep -Seconds 20 }
-        $p = Start-Process -FilePath "python" -ArgumentList $it.Args -NoNewWindow -PassThru -WorkingDirectory $PWD.Path `
+        $p = Start-Process -FilePath $Py -ArgumentList $it.Args -NoNewWindow -PassThru -WorkingDirectory $PWD.Path `
             -RedirectStandardOutput $it.Log -RedirectStandardError ($it.Log -replace "\.log$", ".err")
         $null = $p.Handle                       # keeps the exit code readable after the process ends
         [void]$running.Add(@{ Name = $it.Name; P = $p; Log = $it.Log })
@@ -149,5 +182,5 @@ if ($evals.Count) { Invoke-Queue $evals 4 }
 
 # ---------- table ----------
 Write-Host ""
-python vulva\seed_table.py $Out --ref ir --copy-to $CopyTo
+& $Py vulva\seed_table.py $Out --ref ir --copy-to $CopyTo
 Write-Host ("`nAll done after {0:N0} min. Paste me the table above (also in $Out\seed_table.txt)." -f ((Get-Date) - $t0).TotalMinutes)
