@@ -1414,6 +1414,22 @@ def test_build_dataset_splits_leak_checks_and_split_guard():
         with open(os.path.join(ds, "label_set.csv")) as f:
             assert len(list(csv.DictReader(f))) == 5
         assert os.path.exists(os.path.join(ds, "README.md")) and "no animal-day" in out.stdout
+        # a later version: every split of ds carried over as it is, plus a new training set
+        extra = make_set("feb_more", [(3, "20260224-22-00-01"), (4, "20260302-12-00-02")])
+        ds3 = os.path.join(tmp, "ds3")
+        o3 = subprocess.run([PY, tool, ds3, "--from-dataset", os.path.join(ds, "labels.csv"),
+                             "--add", "train", "more", extra], capture_output=True, text=True, cwd=tmp)
+        assert o3.returncode == 0, o3.stdout[-2000:] + o3.stderr[-2000:]
+        with open(os.path.join(ds3, "labels.csv")) as f:
+            rows3 = list(csv.DictReader(f))
+        assert len(rows3) == 7 and sum(r["split"] == "train" for r in rows3) == 5
+        assert sorted(r["frame_id"] for r in rows3 if r["split"] == "test_newdays") == \
+            sorted(r["frame_id"] for r in rows if r["split"] == "test_newdays")          # tests unchanged
+        assert {r["source"] for r in rows3} == {"feb", "feb12", "more"}                  # sources kept
+        with open(os.path.join(ds3, "tail_labels.csv")) as f:
+            t3 = list(csv.DictReader(f))
+        assert len(t3) == 1 and os.path.exists(os.path.join(ds3, t3[0]["tail_mask_path"]))
+        assert all(os.path.exists(os.path.join(ds3, r["ir_path"])) for r in rows3)
         rep = os.path.join(tmp, "seg_report.json")                # train split taken from a run's report
         with open(rep, "w") as f:
             json.dump({"labels": [tr]}, f)
@@ -1998,7 +2014,7 @@ def test_seed_table_means_spreads_and_differences():
                 ("ir", 2, "test_newdays"): (0.934, 0.378), ("pre_ir", 42, "test_newdays"): (0.940, 0.400),
                 ("pre_ir", 1, "test_newdays"): (0.936, 0.396), ("ir", 42, "test_newsows"): (0.540, 0.098),
                 ("fusion", 42, "test_newdays"): (0.925, 0.397), ("pre_fusion", 42, "test_newdays"): (0.930, 0.390),
-                ("fusion_m", 42, "test_newdays"): (0.931, 0.401)}
+                ("fusion_m", 42, "test_newdays"): (0.931, 0.401), ("fusion_v2", 42, "test_newdays"): (0.94, 0.41)}
         for (recipe, seed, split), (m50, m5095) in vals.items():
             d = os.path.join(tmp, f"eval_{recipe}_s{seed}_{split}")
             os.makedirs(d)
@@ -2038,10 +2054,11 @@ def test_seed_table_means_spreads_and_differences():
         fus, pfus = s["test_newdays"]["fusion"], s["test_newdays"]["pre_fusion"]
         assert pre["vs"] == "ir" and fus["vs"] == "ir" and pfus["vs"] == "fusion"      # pre_X against X
         assert s["test_newdays"]["fusion_m"]["vs"] == "fusion"                          # X_m (mirror) against X
+        assert s["test_newdays"]["fusion_v2"]["vs"] == "fusion"                         # X_v2 against X
         assert abs(pfus["map50_95_diff"] + 0.007) < 1e-9
         with open(os.path.join(tmp, "seed_table.csv")) as f:
             rows = list(csv.DictReader(f))
-        assert len(rows) == 10 and {r["ap75"] for r in rows if r["seed"] != "ens"} == {"0.18"}
+        assert len(rows) == 11 and {r["ap75"] for r in rows if r["seed"] != "ens"} == {"0.18"}
         assert ir["ens"]["map50_95"] == 0.405 and ir["seeds"] == [1, 2, 42]           # the ensemble is not a seed
         assert abs(ir["width_bias_mean"] - (-(6.5 + 7.5 + 7.5) / 3)) < 1e-9 and abs(ir["hand_length_mean"] - 86.6) < 1e-9
         with open(os.path.join(tmp, "seed_table.txt")) as f:

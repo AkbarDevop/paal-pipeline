@@ -79,19 +79,24 @@ def read_tails(labels_csv):
 
 
 def collect(sources, frames_roots, starts):
-    """sources: [(split, name, labels_csv)] -> (frames {key: row}, problems [str])."""
+    """sources: [(split, name, labels_csv[, only_split])] -> (frames {key: row}, problems [str]).
+    only_split: take only that split's rows of a dataset table (--from-dataset); name None keeps each
+    row's own source."""
     from eval_seg import read_rows
     frames, problems = {}, []
-    for split, name, path in sources:
+    for src in sources:
+        split, name, path = src[:3]
+        only = src[3] if len(src) > 3 else None
         with open(path, newline="", encoding="utf-8-sig") as f:
-            raw_ir = [r["ir_path"] for r in csv.DictReader(f) if r.get("label") in ("present", "absent")]
-        rows = read_rows(path, frames_roots)
+            raw_ir = [r["ir_path"] for r in csv.DictReader(f) if r.get("label") in ("present", "absent")
+                      and (only is None or r.get("split") == only)]
+        rows = read_rows(path, frames_roots, {only} if only else None)
         tails = read_tails(path)
         for r, orig in zip(rows, raw_ir):
             pid, ts = pig_int(r.get("pig_id")), r.get("pig_timestamp", "")
             key = (pid, ts)
             date, hour = ts[:8], (int(ts[9:11]) if len(ts) >= 11 and ts[9:11].isdigit() else -1)
-            row = dict(r, split=split, source=name, date=date, hour=hour, pig_id=pid,
+            row = dict(r, split=split, source=name or r.get("source", "") or split, date=date, hour=hour, pig_id=pid,
                        batch=batch_of(date, starts), _tail=tails.get(orig))
             row["animal_id"] = f"{row['batch']}_s{pid:02d}"
             row["frame_id"] = f"{r.get('timestamp_folder', '')}_pig{pid}_{ts}"
@@ -229,6 +234,8 @@ def main():
                     help="a label set: its split (train, test_newdays, ...), a short name and its labels CSV")
     ap.add_argument("--train-from", default="", help="seg_report.json of a training run: its label files become "
                     "the train split (named after their folders)")
+    ap.add_argument("--from-dataset", default="", help="an earlier dataset table (e.g. vulva_dataset_v1\\labels.csv): every "
+                    "split is carried over as it is (same frames, same split, tails and colour), before the --add sets")
     ap.add_argument("--frames-root", default="", help="';'-separated raw folders (images not next to the labels)")
     ap.add_argument("--batch-starts", default="2026-02-05", help="comma dates where a new batch of sows starts")
     ap.add_argument("--dry-run", action="store_true", help="check and count only, copy nothing")
@@ -241,8 +248,14 @@ def main():
         with open(args.train_from) as f:
             for p in json.load(f)["labels"]:
                 sources.insert(0, ("train", os.path.basename(os.path.dirname(os.path.abspath(p))), p))
+    if args.from_dataset:
+        with open(args.from_dataset, newline="", encoding="utf-8-sig") as f:
+            splits = sorted({r.get("split", "") for r in csv.DictReader(f)} - {""})
+        if not splits:
+            sys.exit(f"--from-dataset: {args.from_dataset} has no split column")
+        sources = [(sp, None, args.from_dataset, sp) for sp in splits] + sources
     if not sources:
-        sys.exit("Nothing to build: give --train-from and/or --add SPLIT NAME LABELS_CSV")
+        sys.exit("Nothing to build: give --from-dataset, --train-from and/or --add SPLIT NAME LABELS_CSV")
     frames, problems = collect(sources, roots, starts)
     errors, notes = leak_checks(frames)
     errors = problems + errors

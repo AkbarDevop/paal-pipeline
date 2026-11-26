@@ -57,6 +57,8 @@ powershell -ExecutionPolicy Bypass -File vulva\experiments\e10b_pre_drop.ps1   #
 python vulva/export_label_set.py <predictions.csv> <out> --pigs 6,7,8,10,11,15,16,18 --dates <Jan days> --per-day 3 --windows 00:00-23:59 --exclude <dataset>/labels.csv --rgb   # more new-sow test frames
 python vulva/data_summary.py <dataset>/labels.csv --split train   # what the labels cover: days, time of day, stalls, sources
 python vulva/export_label_set.py <predictions.csv> <out> --dates <fixed days> --per-day 2 --night-per-day 1 --windows 00:00-23:59 --exclude <dataset>/labels.csv --rgb   # diverse frames to label
+python vulva/build_dataset.py <v2 dir> --from-dataset <v1>/labels.csv --add train <name> <labels.csv>   # next dataset version, tests unchanged
+powershell -ExecutionPolicy Bypass -File vulva\experiments\e13_v2.ps1   # lab PC: dataset v2 (diverse round), depth + fusion_drop retrained, scored
 python tests/test_vulva_pipeline.py                                  # 49 synthetic checks
 ```
 

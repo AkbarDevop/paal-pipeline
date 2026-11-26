@@ -17,7 +17,8 @@ Folder names say what each eval is, as written by the E1b / E10 run:
 Prints, per test split and recipe: the seeds, mAP50-95 and mAP50 per seed, their mean and spread,
 and the difference of means against its baseline next to the larger of the two spreads. The baseline
 is the reference recipe (--ref), except for a recipe started from a pretrained model, pre_<X>, which
-is compared with <X> (pre_ir with ir, pre_fusion with fusion), and so is <X>_m (mirror averaged). Writes the per-seed rows to
+is compared with <X> (pre_ir with ir, pre_fusion with fusion), and so are <X>_m (mirror averaged) and
+<X>_v2 (the same recipe trained on dataset v2). Writes the per-seed rows to
 seed_table.csv; --copy-to also copies the table and every eval report there (e.g. the Mac share).
 Below the table: outline size against the hand outlines (seed means), and, from each eval's
 eval_frames.csv, which visible vulvas every seed finds, some find and none finds, and the frames that
@@ -79,6 +80,8 @@ def baseline_of(recipe, recs, ref):
         return recipe[4:]
     if recipe.endswith("_m") and recipe[:-2] in recs:
         return recipe[:-2]
+    if recipe.endswith("_v2") and recipe[:-3] in recs:              # same recipe on the next dataset version
+        return recipe[:-3]
     return ref if recipe != ref and ref in recs else None
 
 
