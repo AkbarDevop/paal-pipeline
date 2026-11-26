@@ -1902,6 +1902,30 @@ def test_ir_dropout_hides_the_ir_of_fusion_frames_in_training_only():
         shutil.rmtree(tmp)
 
 
+def test_subsample_keeps_a_share_of_frames_or_of_animals():
+    """train_seg.py --keep-frames / --keep-animals (learning curve): half the frames keeps every animal and
+    half of each animal's visible and not-visible frames; half the animals keeps all frames of half of them;
+    the choice follows the seed."""
+    from train_seg import subsample
+    items = []
+    for a in range(6):
+        for k in range(10):
+            m = np.zeros((4, 4), np.uint8)
+            if k < 4:
+                m[1, 1] = 1
+            items.append({"row": {"animal_id": f"b1_s{a:02d}"}, "pig_id": a, "mask": m})
+    half = subsample(items, keep_frames=0.5, seed=1)
+    assert len(half) == 30 and len({it["row"]["animal_id"] for it in half}) == 6
+    assert sum(int(it["mask"].any()) for it in half) == 12                    # 2 of 4 visible per animal
+    an = subsample(items, keep_animals=0.5, seed=1)
+    ids = {it["row"]["animal_id"] for it in an}
+    assert len(an) == 30 and len(ids) == 3
+    assert {it["row"]["animal_id"] for it in subsample(items, keep_animals=0.5, seed=1)} == ids
+    assert subsample(items) is not None and len(subsample(items)) == 60
+    pos = {id(it): i for i, it in enumerate(items)}
+    assert [pos[id(it)] for it in half] == sorted(pos[id(it)] for it in half)       # order kept
+
+
 def test_seed_table_means_spreads_and_differences():
     """seed_table.py: eval folders named eval_<recipe>_s<seed>_<split> -> per recipe and test the mean and spread
     over seeds, and the difference against the reference recipe next to the larger spread."""

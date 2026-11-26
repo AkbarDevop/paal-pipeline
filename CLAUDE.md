@@ -52,7 +52,8 @@ python vulva/eval_seg.py --model <a.pth> <b.pth> <c.pth> --mirror --labels <data
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e1c_depth.ps1   # lab PC: depth-only seeds + a third fusion seed, scored
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e4_ensemble.ps1   # lab PC: three-seed ensembles + mirror, no training
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e1d_irdrop.ps1   # lab PC: fusion with the IR hidden in half the training frames
-python tests/test_vulva_pipeline.py                                  # 45 synthetic checks
+powershell -ExecutionPolicy Bypass -File vulva\experiments\e5_curve.ps1 -Base <recipe> -Inputs <inputs> -Seeds 1,2,3   # lab PC: half the frames vs half the animals
+python tests/test_vulva_pipeline.py                                  # 46 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

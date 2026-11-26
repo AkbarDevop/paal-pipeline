@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import csv
 import json
 import math
@@ -191,6 +192,35 @@ def load_items(path):
 
 def has_vulva(it):
     return bool((it["mask"] == 1).any())
+
+
+def animal_of(it):
+    """An animal is batch + stall (dataset v1's animal_id); older label sets only have the stall."""
+    return it["row"].get("animal_id") or f"s{it['pig_id']}"
+
+
+def subsample(items, keep_frames=1.0, keep_animals=1.0, seed=42):
+    """Learning-curve runs (does more training data help, and is it more frames or more animals?):
+    keep_animals < 1 keeps that share of the animals with all their frames; keep_frames < 1 keeps that
+    share of every animal's frames, visible and not-visible thinned alike. Chosen by the seed; order kept."""
+    rng = random.Random(seed * 7919 + 17)
+    keep = list(range(len(items)))
+    if keep_animals < 1:
+        ids = sorted({animal_of(items[i]) for i in keep})
+        rng.shuffle(ids)
+        chosen = set(ids[:max(1, round(len(ids) * keep_animals))])
+        keep = [i for i in keep if animal_of(items[i]) in chosen]
+    if keep_frames < 1:
+        groups = defaultdict(list)
+        for i in keep:
+            groups[(animal_of(items[i]), has_vulva(items[i]))].append(i)
+        chosen = set()
+        for k in sorted(groups):
+            g = groups[k][:]
+            rng.shuffle(g)
+            chosen.update(g[:max(1, round(len(g) * keep_frames))])
+        keep = [i for i in keep if i in chosen]
+    return [items[i] for i in keep]
 
 
 def assign_folds(pigs, k, seed=42):
@@ -440,6 +470,10 @@ def main():
     ap.add_argument("--ir-dropout", type=float, default=0.0,
                     help="fusion only: share of training frames whose IR is hidden (e.g. 0.5), so the model also "
                          "learns the vulva from depth and does not lean on how the IR of these sows looks")
+    ap.add_argument("--keep-frames", type=float, default=1.0,
+                    help="learning curve: train on this share of every animal's frames (e.g. 0.5)")
+    ap.add_argument("--keep-animals", type=float, default=1.0,
+                    help="learning curve: train on this share of the animals, all their frames (e.g. 0.5)")
     ap.add_argument("--out-model", default=os.path.join("models", "vulva_seg.pth"))
     ap.add_argument("--out-dir", default=os.path.join("outputs", "vulva_seg"))
     ap.add_argument("--copy-to", default="",
@@ -484,6 +518,11 @@ def main():
 
     t0 = time.time()
     items = load_labels(args.labels, args.inputs, args.frames_roots, args.classes, split_set(args.split))
+    if args.keep_frames < 1 or args.keep_animals < 1:
+        n_all, a_all = len(items), len({animal_of(it) for it in items})
+        items = subsample(items, args.keep_frames, args.keep_animals, args.seed)
+        log(f"Learning curve: kept {len(items)} of {n_all} frames, {len({animal_of(it) for it in items})} of {a_all} "
+            f"animals (--keep-frames {args.keep_frames}, --keep-animals {args.keep_animals})")
     pigs = sorted({it["pig_id"] for it in items})
     n_pos = int(sum(has_vulva(it) for it in items))
     log(f"{len(items)} frames from {len(pigs)} sows: {n_pos} with a vulva mask, {len(items) - n_pos} without"
@@ -496,7 +535,8 @@ def main():
 
     report = {"labels": args.labels, "split": args.split, "frames": len(items), "present": n_pos, "sows": pigs,
               "epochs": args.epochs, "device": device, "inputs": args.inputs, "scale_aug": args.scale_aug,
-              "classes": args.classes, "init_from": args.init_from, "ir_dropout": args.ir_dropout}
+              "classes": args.classes, "init_from": args.init_from, "ir_dropout": args.ir_dropout,
+              "keep_frames": args.keep_frames, "keep_animals": args.keep_animals}
     if args.init_from and not os.path.exists(args.init_from):
         sys.exit(f"--init-from: {args.init_from} not found")
     if args.folds and len(pigs) >= args.folds:
@@ -539,7 +579,8 @@ def main():
                                             "classes": args.classes,
                                             "presence_threshold": presence, "scale_aug": args.scale_aug,
                                             "trained_on": len(items), "sows": pigs, "init_from": args.init_from,
-                                            "ir_dropout": args.ir_dropout,
+                                            "ir_dropout": args.ir_dropout, "keep_frames": args.keep_frames,
+                                            "keep_animals": args.keep_animals,
                                             "date": time.strftime("%Y-%m-%d")})
     log(f"Saved {args.out_model}  ({time.time() - t0:.0f} s)")
     report["seconds"] = round(time.time() - t0, 1)
