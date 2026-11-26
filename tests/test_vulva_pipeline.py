@@ -1864,6 +1864,44 @@ def test_ensemble_averages_seeds_and_mirror_and_eval_seg_takes_several_models():
         shutil.rmtree(tmp)
 
 
+def test_ir_dropout_hides_the_ir_of_fusion_frames_in_training_only():
+    """train_seg.py --ir-dropout: for a fusion model a share of training frames get their IR channels set to
+    the IR mean (0 after normalising), so the model also learns the vulva from depth; depth channels are kept;
+    no effect without augmentation (scoring) or for IR models; the run records the setting."""
+    import torch
+    from seg_model import SEG_H, SEG_W
+    from train_seg import SegData
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 255, (SEG_H, SEG_W, 3), dtype=np.uint8)            # [ir, height, shape index]
+    item = {"image": img, "mask": np.zeros((SEG_H, SEG_W), np.uint8), "tail_known": False}
+    x = SegData([item], augment=True, inputs="fusion", ir_dropout=1.0)[0][0]
+    assert x.shape[0] == 5 and float(x[:3].abs().sum()) == 0 and float(x[3:].abs().sum()) > 0
+    x = SegData([item], augment=True, inputs="fusion", ir_dropout=0.0)[0][0]
+    assert float(x[:3].abs().sum()) > 0
+    x = SegData([item], augment=False, inputs="fusion", ir_dropout=1.0)[0][0]
+    assert float(x[:3].abs().sum()) > 0                                       # never when scoring
+    grey = {"image": img[..., 0], "mask": item["mask"], "tail_known": False}
+    x = SegData([grey], augment=True, inputs="ir", ir_dropout=1.0)[0][0]
+    assert float(x.abs().sum()) > 0                                           # IR models are left alone
+    tmp = tempfile.mkdtemp()
+    try:
+        zp = os.path.join(tmp, "rf.zip")
+        _roboflow_zip(zp)
+        rf = os.path.join(tmp, "rf")
+        subprocess.run([PY, os.path.join(ROOT, "vulva", "import_roboflow.py"), zp, rf, "--sheet", "0"],
+                       check=True, capture_output=True)
+        o = subprocess.run([PY, os.path.join(ROOT, "vulva", "train_seg.py"), "--labels", os.path.join(rf, "labels.csv"),
+                            "--classes", "3", "--folds", "0", "--epochs", "1", "--batch-size", "2", "--no-pretrained",
+                            "--ir-dropout", "0.5", "--out-model", os.path.join(tmp, "m.pth"),
+                            "--out-dir", os.path.join(tmp, "o")], capture_output=True, text=True, cwd=tmp)
+        assert o.returncode == 0, o.stdout[-1500:] + o.stderr[-1500:]
+        with open(os.path.join(tmp, "o", "seg_report.json")) as f:
+            assert json.load(f)["ir_dropout"] == 0.5
+        assert torch.load(os.path.join(tmp, "m.pth"), weights_only=False)["ir_dropout"] == 0.5
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_seed_table_means_spreads_and_differences():
     """seed_table.py: eval folders named eval_<recipe>_s<seed>_<split> -> per recipe and test the mean and spread
     over seeds, and the difference against the reference recipe next to the larger spread."""

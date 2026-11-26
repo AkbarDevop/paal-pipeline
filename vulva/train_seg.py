@@ -201,8 +201,9 @@ def assign_folds(pigs, k, seed=42):
 
 
 class SegData(Dataset):
-    def __init__(self, items, augment, inputs="ir"):
+    def __init__(self, items, augment, inputs="ir", ir_dropout=0.0):
         self.items, self.augment, self.inputs = items, augment, inputs
+        self.ir_dropout = ir_dropout if inputs == "fusion" else 0.0
 
     def __len__(self):
         return len(self.items)
@@ -224,7 +225,10 @@ class SegData(Dataset):
                 g = np.clip(g.astype(np.float32) * a + b, 0, 255).astype(np.uint8)
             elif self.inputs != "depth":           # brightness/contrast only on the IR channel (none for depth)
                 g[..., 0] = np.clip(g[..., 0].astype(np.float32) * a + b, 0, 255).astype(np.uint8)
-        return (to_tensor(g, self.inputs), torch.from_numpy(m.astype(np.float32))[None],
+        x = to_tensor(g, self.inputs)
+        if self.augment and self.ir_dropout and random.random() < self.ir_dropout:
+            x[:3] = 0.0          # fusion: hide the IR (its mean after normalising) so the model must also use depth
+        return (x, torch.from_numpy(m.astype(np.float32))[None],
                 torch.tensor(float(self.items[i].get("tail_known", False))))
 
 
@@ -270,8 +274,10 @@ def loss_fn(logits, target, pos_weight=1.0, known=None):
 
 
 def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_size=8, log=None, pos_weight=1.0,
-                classes=2, inputs="ir", init_from=""):
-    """init_from: a checkpoint to start from (e.g. pretrained on another data set) instead of ImageNet."""
+                classes=2, inputs="ir", init_from="", ir_dropout=0.0):
+    """init_from: a checkpoint to start from (e.g. pretrained on another data set) instead of ImageNet.
+    ir_dropout (fusion only): share of training frames whose IR channels are hidden, so the model cannot
+    rely on the IR alone (which differs between batches of sows) and learns the vulva's shape in depth too."""
     model = VulvaUNet(pretrained=pretrained and not init_from, n_out=3 if classes == 3 else 1,
                       in_ch=in_channels_for(inputs))
     if init_from:
@@ -285,7 +291,8 @@ def train_model(train_items, epochs, device, pretrained=True, lr=3e-4, batch_siz
     # balance: present frames are the minority
     weights = [1.0 / max(len(pos), 1) if has_vulva(it) else 1.0 / max(len(neg), 1) for it in train_items]
     sampler = torch.utils.data.WeightedRandomSampler(weights, num_samples=len(train_items), replacement=True)
-    dl = DataLoader(SegData(train_items, augment=True, inputs=inputs), batch_size=batch_size, sampler=sampler,
+    dl = DataLoader(SegData(train_items, augment=True, inputs=inputs, ir_dropout=ir_dropout), batch_size=batch_size,
+                    sampler=sampler,
                     num_workers=0)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     steps = max(1, epochs * len(dl))
@@ -430,6 +437,9 @@ def main():
     ap.add_argument("--init-from", default="",
                     help="start every model from this checkpoint instead of ImageNet (e.g. pretrained on the "
                          "Roboflow set, import_roboflow.py); an IR checkpoint can start a fusion model")
+    ap.add_argument("--ir-dropout", type=float, default=0.0,
+                    help="fusion only: share of training frames whose IR is hidden (e.g. 0.5), so the model also "
+                         "learns the vulva from depth and does not lean on how the IR of these sows looks")
     ap.add_argument("--out-model", default=os.path.join("models", "vulva_seg.pth"))
     ap.add_argument("--out-dir", default=os.path.join("outputs", "vulva_seg"))
     ap.add_argument("--copy-to", default="",
@@ -486,7 +496,7 @@ def main():
 
     report = {"labels": args.labels, "split": args.split, "frames": len(items), "present": n_pos, "sows": pigs,
               "epochs": args.epochs, "device": device, "inputs": args.inputs, "scale_aug": args.scale_aug,
-              "classes": args.classes, "init_from": args.init_from}
+              "classes": args.classes, "init_from": args.init_from, "ir_dropout": args.ir_dropout}
     if args.init_from and not os.path.exists(args.init_from):
         sys.exit(f"--init-from: {args.init_from} not found")
     if args.folds and len(pigs) >= args.folds:
@@ -506,7 +516,7 @@ def main():
                 log(f"Fold {k + 1}/{args.folds}: test sows {report['folds'][str(k)]} "
                     f"({len(te_idx)} frames, train {len(tr)})")
                 model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                                    args.pos_weight, args.classes, args.inputs, args.init_from)
+                                    args.pos_weight, args.classes, args.inputs, args.init_from, args.ir_dropout)
                 probs = predict_probs(model, [items[i] for i in te_idx], device)
                 for i, pr in zip(te_idx, probs):
                     oof_probs[i] = pr
@@ -524,11 +534,12 @@ def main():
         model.inputs = args.inputs
     else:
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                            args.pos_weight, args.classes, args.inputs, args.init_from)
+                            args.pos_weight, args.classes, args.inputs, args.init_from, args.ir_dropout)
     save_checkpoint(model, args.out_model, {"min_area": MIN_AREA, "threshold": threshold, "inputs": args.inputs,
                                             "classes": args.classes,
                                             "presence_threshold": presence, "scale_aug": args.scale_aug,
                                             "trained_on": len(items), "sows": pigs, "init_from": args.init_from,
+                                            "ir_dropout": args.ir_dropout,
                                             "date": time.strftime("%Y-%m-%d")})
     log(f"Saved {args.out_model}  ({time.time() - t0:.0f} s)")
     report["seconds"] = round(time.time() - t0, 1)
@@ -587,7 +598,7 @@ def run_job(args):
     if k == args.folds:
         log(f"Final model on all {len(items)} frames ({device})")
         model = train_model(items, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                            args.pos_weight, args.classes, args.inputs, args.init_from)
+                            args.pos_weight, args.classes, args.inputs, args.init_from, args.ir_dropout)
         torch.save(model.state_dict(), os.path.join(args.job_dir, "final.pt"))
         return
     folds = assign_folds([it["pig_id"] for it in items], args.folds, args.seed)
@@ -595,7 +606,7 @@ def run_job(args):
     te = [it for it in items if folds[it["pig_id"]] == k]
     log(f"Fold {k + 1}/{args.folds}: {len(te)} test frames, train {len(tr)} ({device})")
     model = train_model(tr, args.epochs, device, not args.no_pretrained, args.lr, args.batch_size, log,
-                        args.pos_weight, args.classes, args.inputs, args.init_from)
+                        args.pos_weight, args.classes, args.inputs, args.init_from, args.ir_dropout)
     probs = predict_probs(model, te, device)
     np.savez(os.path.join(args.job_dir, f"fold{k}.npz"), keys=np.array([it["row"]["ir_path"] for it in te]),
              probs=np.stack(probs))
@@ -616,6 +627,7 @@ def run_parallel(args, items, folds, report, log):
            "--job-dir", job_dir, "--scale-aug", args.scale_aug, "--classes", str(args.classes),
            "--presence-precision", str(args.presence_precision)] + (["--no-pretrained"] if args.no_pretrained else []) \
         + (["--init-from", os.path.abspath(args.init_from)] if args.init_from else []) \
+        + (["--ir-dropout", str(args.ir_dropout)] if args.ir_dropout else []) \
         + (["--split", args.split] if args.split else [])
     cache = os.path.join(job_dir, "items.npz")    # the frames as loaded here: workers do not touch the share
     save_items(items, cache)
