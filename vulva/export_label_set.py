@@ -99,8 +99,16 @@ def labelled_keys(paths):
     return keys
 
 
-def export(pred_rows, out_dir, windows=None, per_day=3, min_conf=0.6, dates=None, rgb=False, data_roots=None):
+NIGHT = "19:00-23:59,00:00-05:59"
+
+
+def export(pred_rows, out_dir, windows=None, per_day=3, min_conf=0.6, dates=None, rgb=False, data_roots=None,
+           night_per_day=0):
     picked = select(pred_rows, min_conf, windows, per_day)
+    if night_per_day:                  # extra night frames, so a set spread over the day is not mostly daytime
+        have = {(p["timestamp_folder"], p["pig_id"]) for p in picked}
+        picked += [p for p in select(pred_rows, min_conf, parse_windows(NIGHT), night_per_day)
+                   if (p["timestamp_folder"], p["pig_id"]) not in have]
     if dates:
         picked = [p for p in picked if p["pig_timestamp"][:8] in dates]
     if data_roots:                     # predictions made before the data moved: look frames up by folder name
@@ -177,6 +185,8 @@ def main():
     ap.add_argument("--dates", default="", help="comma list of YYYYMMDD to keep (default: all)")
     ap.add_argument("--rgb", action="store_true", help="also copy the colour images (rgb_aligned and rgb)")
     ap.add_argument("--pigs", default="", help="comma list of stall numbers to keep (default: all)")
+    ap.add_argument("--night-per-day", type=int, default=0,
+                    help="also this many night frames (19:00-06:00) per sow per day, on top of --per-day")
     ap.add_argument("--exclude", default="", help="';'-separated label CSVs whose frames are left out "
                     "(e.g. the dataset table, so no frame is labelled twice)")
     ap.add_argument("--data-roots", default="",
@@ -202,7 +212,7 @@ def main():
         print(f"{len(preds)} of {n0} predictions left after --pigs / --exclude"
               + (f" ({len(exclude)} labelled frames excluded)" if exclude else ""))
     rows, missing = export(preds, args.out_dir, parse_windows(args.windows), args.per_day, args.min_conf, dates,
-                           args.rgb, [r for r in args.data_roots.split(";") if r.strip()])
+                           args.rgb, [r for r in args.data_roots.split(";") if r.strip()], args.night_per_day)
     sows = {r["pig_id"] for r in rows}
     days = {r["pig_timestamp"][:8] for r in rows}
     print(f"Copied {len(rows)} frames ({len(sows)} sows, {len(days)} days) to {args.out_dir}; "

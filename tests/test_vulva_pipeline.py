@@ -1947,6 +1947,47 @@ def test_export_keeps_chosen_stalls_and_leaves_out_labelled_frames():
         shutil.rmtree(tmp)
 
 
+def test_data_summary_counts_days_times_and_stalls():
+    """data_summary.py: a labelled set by day, time of day, stall and source (dataset tables and plain sets)."""
+    from data_summary import summarise
+    rows = [{"split": "train", "label": "present", "date": "20260206", "hour": "9", "animal_id": "b2_s03",
+             "source": "feb"},
+            {"split": "train", "label": "absent", "date": "20260206", "hour": "22", "animal_id": "b2_s04",
+             "source": "feb"},
+            {"split": "train", "label": "present", "pig_timestamp": "20260124-15-02-11", "pig_id": "6"}]
+    text = "\n".join(summarise(rows))
+    assert "3 frames, 2 with a visible vulva, 1 without" in text and "2 days, 20260124 to 20260206" in text
+    assert "2026-02: 2 frames on 1 days: 06:2" in text and "night 18-06 1 (33%)" in text
+    assert "afternoon 14-18 1" in text and "3 stalls" in text and "s06 1" in text and "from: feb 2" in text
+
+
+def test_export_night_per_day_adds_night_frames():
+    """export_label_set.py --night-per-day: on top of the frames spread over the day, a night frame per sow per day,
+    so a set picked over whole days is not mostly daytime; no frame is picked twice."""
+    from export_label_set import export
+    from select_frames import parse_windows
+    tmp = tempfile.mkdtemp()
+    try:
+        rng = np.random.default_rng(11)
+        preds = []
+        for hh in ("09", "12", "15", "22"):
+            folder = f"20260225-{hh}-00-00"
+            raw = os.path.join(tmp, "raw", folder)
+            os.makedirs(raw)
+            ts = f"20260225-{hh}-01-00"
+            _write_frame(raw, 3, ts, True, rng)
+            preds.append({"timestamp_folder": folder, "pig_id": 3, "pig_timestamp": ts, "prediction_name": "standing",
+                          "confidence": 0.9, "id_status": "ok", "image_path": os.path.join(raw, f"pig3_ir_vis_{ts}.jpg")})
+        rows, _ = export(preds, os.path.join(tmp, "a"), parse_windows("00:00-23:59"), 1)
+        assert [r["pig_timestamp"][9:11] for r in rows] == ["15"]
+        rows, _ = export(preds, os.path.join(tmp, "b"), parse_windows("00:00-23:59"), 1, night_per_day=1)
+        assert sorted(r["pig_timestamp"][9:11] for r in rows) == ["15", "22"]
+        rows, _ = export(preds, os.path.join(tmp, "c"), parse_windows("19:00-23:59"), 1, night_per_day=1)
+        assert [r["pig_timestamp"][9:11] for r in rows] == ["22"]                  # not picked twice
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_seed_table_means_spreads_and_differences():
     """seed_table.py: eval folders named eval_<recipe>_s<seed>_<split> -> per recipe and test the mean and spread
     over seeds, and the difference against the reference recipe next to the larger spread."""

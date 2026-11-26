@@ -55,7 +55,9 @@ powershell -ExecutionPolicy Bypass -File vulva\experiments\e1d_irdrop.ps1   # la
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e5_curve.ps1 -Base <recipe> -Inputs <inputs> -Seeds 1,2,3   # lab PC: half the frames vs half the animals
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e10b_pre_drop.ps1   # lab PC: the adopted recipe started from the 2022 Roboflow model
 python vulva/export_label_set.py <predictions.csv> <out> --pigs 6,7,8,10,11,15,16,18 --dates <Jan days> --per-day 3 --windows 00:00-23:59 --exclude <dataset>/labels.csv --rgb   # more new-sow test frames
-python tests/test_vulva_pipeline.py                                  # 47 synthetic checks
+python vulva/data_summary.py <dataset>/labels.csv --split train   # what the labels cover: days, time of day, stalls, sources
+python vulva/export_label_set.py <predictions.csv> <out> --dates <fixed days> --per-day 2 --night-per-day 1 --windows 00:00-23:59 --exclude <dataset>/labels.csv --rgb   # diverse frames to label
+python tests/test_vulva_pipeline.py                                  # 49 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)
