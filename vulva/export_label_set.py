@@ -22,6 +22,9 @@ Usage (lab PC, copying to the Mac through the Remote Desktop share):
     # test set for eval_seg.py: new days, 2 per sow-day spread over the whole day, labelled without --model
     python vulva/export_label_set.py outputs\gt_feb12\predictions.csv \\tsclient\paal_exchange\vulva_test_feb12 ^
         --dates 20260212,20260213,20260214,20260215 --per-day 2 --windows 00:00-23:59 --rgb
+    # more of the January test sows (stalls 6 7 8 10 11 15 16 18), day and night, none already labelled
+    python vulva/export_label_set.py <predictions.csv> C:\Users\aakdbx\vulva_jan_test_more --pigs 6,7,8,10,11,15,16,18 ^
+        --dates 20260123,...,20260130 --per-day 3 --windows 00:00-23:59 --exclude <dataset>\labels.csv --rgb
 """
 
 from __future__ import annotations
@@ -62,6 +65,38 @@ def _copy_rgb(ir_src, out_dir, folder):
         shutil.copy2(src, os.path.join(out_dir, r))
         rel[field] = r.replace("\\", "/")
     return rel
+
+
+def frame_key(timestamp_folder, path):
+    return (str(timestamp_folder), os.path.basename(str(path).replace("\\", "/")))
+
+
+def keep_rows(pred_rows, pigs=None, exclude=None):
+    """Predictions limited to some stalls (pigs) and without frames already in a label set (exclude: keys
+    from frame_key), before frames are picked, so the picker spreads over the frames that are left."""
+    out = []
+    for r in pred_rows:
+        if pigs is not None:
+            try:
+                if int(float(r.get("pig_id", ""))) not in pigs:
+                    continue
+            except ValueError:
+                continue
+        if exclude and frame_key(r.get("timestamp_folder", ""), r.get("image_path", "")) in exclude:
+            continue
+        out.append(r)
+    return out
+
+
+def labelled_keys(paths):
+    """Label CSVs (labels.csv, label_set.csv, a dataset table) -> keys of the frames they hold."""
+    keys = set()
+    for p in paths:
+        with open(p, newline="", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                ts = r.get("timestamp_folder") or os.path.basename(os.path.dirname(r.get("ir_path", "").replace("\\", "/")))
+                keys.add(frame_key(ts, r.get("ir_path", "")))
+    return keys
 
 
 def export(pred_rows, out_dir, windows=None, per_day=3, min_conf=0.6, dates=None, rgb=False, data_roots=None):
@@ -141,6 +176,9 @@ def main():
     ap.add_argument("--min-conf", type=float, default=0.6)
     ap.add_argument("--dates", default="", help="comma list of YYYYMMDD to keep (default: all)")
     ap.add_argument("--rgb", action="store_true", help="also copy the colour images (rgb_aligned and rgb)")
+    ap.add_argument("--pigs", default="", help="comma list of stall numbers to keep (default: all)")
+    ap.add_argument("--exclude", default="", help="';'-separated label CSVs whose frames are left out "
+                    "(e.g. the dataset table, so no frame is labelled twice)")
     ap.add_argument("--data-roots", default="",
                     help="';'-separated folders holding the timestamp folders, for predictions made before the data "
                          "moved")
@@ -156,6 +194,13 @@ def main():
               f"plain RGB for {counts['rgb_path']}; {no_source} frames not found in the predictions")
         return
     dates = {d.strip() for d in args.dates.split(",") if d.strip()} or None
+    pigs = {int(p) for p in args.pigs.split(",") if p.strip()} or None
+    exclude = labelled_keys([p for p in args.exclude.split(";") if p.strip()]) if args.exclude else None
+    n0 = len(preds)
+    preds = keep_rows(preds, pigs, exclude)
+    if pigs or exclude:
+        print(f"{len(preds)} of {n0} predictions left after --pigs / --exclude"
+              + (f" ({len(exclude)} labelled frames excluded)" if exclude else ""))
     rows, missing = export(preds, args.out_dir, parse_windows(args.windows), args.per_day, args.min_conf, dates,
                            args.rgb, [r for r in args.data_roots.split(";") if r.strip()])
     sows = {r["pig_id"] for r in rows}

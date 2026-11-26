@@ -53,7 +53,8 @@ powershell -ExecutionPolicy Bypass -File vulva\experiments\e1c_depth.ps1   # lab
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e4_ensemble.ps1   # lab PC: three-seed ensembles + mirror, no training
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e1d_irdrop.ps1   # lab PC: fusion with the IR hidden in half the training frames
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e5_curve.ps1 -Base <recipe> -Inputs <inputs> -Seeds 1,2,3   # lab PC: half the frames vs half the animals
-python tests/test_vulva_pipeline.py                                  # 46 synthetic checks
+python vulva/export_label_set.py <predictions.csv> <out> --pigs 6,7,8,10,11,15,16,18 --dates <Jan days> --per-day 3 --windows 00:00-23:59 --exclude <dataset>/labels.csv --rgb   # more new-sow test frames
+python tests/test_vulva_pipeline.py                                  # 47 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

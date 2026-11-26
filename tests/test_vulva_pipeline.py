@@ -1926,6 +1926,27 @@ def test_subsample_keeps_a_share_of_frames_or_of_animals():
     assert [pos[id(it)] for it in half] == sorted(pos[id(it)] for it in half)       # order kept
 
 
+def test_export_keeps_chosen_stalls_and_leaves_out_labelled_frames():
+    """export_label_set.py --pigs / --exclude: a bigger test set of chosen stalls without any frame that is
+    already in a label set (matched by timestamp folder and file name, wherever the files were copied)."""
+    from export_label_set import keep_rows, labelled_keys
+    preds = [{"timestamp_folder": "20260124-08-00-00", "pig_id": str(p),
+              "image_path": f"C:\\raw\\20260124-08-00-00\\pig{p}_ir_vis_20260124-08-0{p % 10}-00.jpg"} for p in range(12)]
+    tmp = tempfile.mkdtemp()
+    try:
+        lab = os.path.join(tmp, "labels.csv")
+        with open(lab, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["ir_path", "timestamp_folder", "label"])
+            w.writerow(["frames/20260124-08-00-00/pig7_ir_vis_20260124-08-07-00.jpg", "20260124-08-00-00", "present"])
+        keys = labelled_keys([lab])
+        kept = keep_rows(preds, pigs={6, 7, 8, 10}, exclude=keys)
+        assert sorted(int(r["pig_id"]) for r in kept) == [6, 8, 10]
+        assert len(keep_rows(preds)) == 12
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_seed_table_means_spreads_and_differences():
     """seed_table.py: eval folders named eval_<recipe>_s<seed>_<split> -> per recipe and test the mean and spread
     over seeds, and the difference against the reference recipe next to the larger spread."""
