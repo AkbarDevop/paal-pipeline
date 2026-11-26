@@ -48,7 +48,9 @@ python vulva/import_roboflow.py <vulva_seg coco-segmentation.zip> <set>   # 2022
 python vulva/train_seg.py --labels <set>/labels.csv --classes 3 --out-model models/vulva_pre_roboflow.pth   # pretrain; then --init-from it to fine-tune
 python vulva/seed_table.py outputs/seeds                             # seeds: mean, spread, each recipe against its baseline
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e1b_e10.ps1   # lab PC: E1b seeds + E10 fine-tuning, scored, one table
-python tests/test_vulva_pipeline.py                                  # 43 synthetic checks
+python vulva/eval_seg.py --model <a.pth> <b.pth> <c.pth> --mirror --labels <dataset>/labels.csv --split test_newdays   # seeds as one model
+powershell -ExecutionPolicy Bypass -File vulva\experiments\e4_ensemble.ps1   # lab PC: three-seed ensembles + mirror, no training
+python tests/test_vulva_pipeline.py                                  # 44 synthetic checks
 ```
 
 ### Task B: legacy manual tools (v1)

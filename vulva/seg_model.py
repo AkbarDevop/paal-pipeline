@@ -316,6 +316,44 @@ def load_checkpoint(path, device="cpu"):
     return model, ckpt
 
 
+class Ensemble(nn.Module):
+    """Several models of one kind (e.g. one recipe trained with several seeds) used as one: the per-pixel
+    class probabilities are averaged, with mirror=True also over the left-right mirror of each frame
+    (training mirrors frames too). forward returns log-probabilities, so softmax(output) is the mean
+    probability and predict_parts treats the ensemble like a single 3-class model (1-output models:
+    the logit of the mean probability)."""
+
+    def __init__(self, models, mirror=False):
+        super().__init__()
+        self.members = nn.ModuleList(models)
+        self.mirror = mirror
+        self.n_out = getattr(models[0], "n_out", 1)
+        self.inputs = getattr(models[0], "inputs", None)
+
+    def forward(self, x):
+        probs = []
+        for m in self.members:
+            for flip in ((False, True) if self.mirror else (False,)):
+                y = m(torch.flip(x, dims=[3]) if flip else x)
+                y = torch.flip(y, dims=[3]) if flip else y
+                probs.append(torch.softmax(y, 1) if self.n_out == 3 else torch.sigmoid(y))
+        p = torch.stack(probs).mean(0).clamp(1e-6, 1 - 1e-6)
+        return torch.log(p) if self.n_out == 3 else torch.log(p / (1 - p))
+
+
+def load_ensemble(paths, device="cpu", mirror=False):
+    """One checkpoint, or several of the same inputs and classes, -> (model or Ensemble, first checkpoint).
+    The first checkpoint's settings (threshold, minimum area, keep rule) are used for the whole ensemble."""
+    paths = [paths] if isinstance(paths, str) else list(paths)
+    loaded = [load_checkpoint(p, device) for p in paths]
+    kinds = {(getattr(m, "inputs", None), getattr(m, "n_out", 1)) for m, _ in loaded}
+    if len(kinds) > 1:
+        raise ValueError(f"an ensemble needs models of one kind (inputs, classes); got {sorted(map(str, kinds))}")
+    if len(loaded) == 1 and not mirror:
+        return loaded[0]
+    return Ensemble([m for m, _ in loaded], mirror).to(device).eval(), loaded[0][1]
+
+
 def blob_confidence(prob, mask):
     """Mean probability inside the predicted blob (0 when there is none): how sure the
     model is that the blob is a vulva. train_seg.py tunes a cut on it from held-out sows."""

@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 from measure3d import load_depth_raw, load_intrinsics, measure  # noqa: E402
 from rgb_align import register  # noqa: E402
 from keep_rule import keep, rule_from_checkpoint  # noqa: E402
-from seg_model import default_depth_path, ir_channel, load_checkpoint, predict_parts, read_input, read_mask  # noqa: E402
+from seg_model import default_depth_path, ir_channel, load_ensemble, predict_parts, read_input, read_mask  # noqa: E402
 from train_seg import require_split, split_set  # noqa: E402
 
 FIELDS = ["timestamp_folder", "pig_id", "pig_timestamp", "label", "note", "how", "verdict", "model_visible",
@@ -269,7 +269,10 @@ def save_sheet(frames, path, cols=8, colour=True):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default=os.path.join("models", "vulva_seg.pth"))
+    ap.add_argument("--model", nargs="+", default=[os.path.join("models", "vulva_seg.pth")],
+                    help="one checkpoint, or several of one kind (e.g. three seeds): their probabilities are averaged")
+    ap.add_argument("--mirror", action="store_true",
+                    help="also average each model over the left-right mirror of the frame")
     ap.add_argument("--labels", required=True, help="labels.csv of a label set the model was not trained on")
     ap.add_argument("--out-dir", default="", help="default: outputs/eval_<model name>")
     ap.add_argument("--calibration", default="", help="calibration.json with tof_intrinsics")
@@ -281,16 +284,17 @@ def main():
     args = ap.parse_args()
     require_split(args.labels, args.split)
 
-    name = os.path.splitext(os.path.basename(args.model))[0]
+    name = os.path.splitext(os.path.basename(args.model[0]))[0] + (f"_ens{len(args.model)}" if len(args.model) > 1 else "")
     out_dir = args.out_dir or os.path.join("outputs", f"eval_{name}")
     os.makedirs(out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-    model, ckpt = load_checkpoint(args.model, device)
+    model, ckpt = load_ensemble(args.model, device, args.mirror)
     rows = read_rows(args.labels, [r for r in args.frames_root.split(";") if r.strip()], split_set(args.split))
     if not rows:
         sys.exit(f"No labelled frames in {args.labels}")
     frames = evaluate(model, ckpt, rows, device, load_intrinsics(args.calibration))
-    lines = [f"Model {args.model} on {args.labels}" + (f" (split {args.split})" if args.split else "")] + summarise(frames, rule_from_checkpoint(ckpt))
+    what = " + ".join(args.model) + (" (mirror averaged)" if args.mirror else "")
+    lines = [f"Model {what} on {args.labels}" + (f" (split {args.split})" if args.split else "")] + summarise(frames, rule_from_checkpoint(ckpt))
     print("\n".join(lines))
     with open(os.path.join(out_dir, "eval_report.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")

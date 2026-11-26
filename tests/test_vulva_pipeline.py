@@ -1801,6 +1801,69 @@ def test_init_from_starts_a_model_from_a_checkpoint_and_ir_into_fusion():
         shutil.rmtree(tmp)
 
 
+def test_ensemble_averages_seeds_and_mirror_and_eval_seg_takes_several_models():
+    """seg_model.Ensemble / load_ensemble: several checkpoints of one kind become one model whose probabilities
+    are the mean of theirs (optionally also over the left-right mirror); models of another kind are refused;
+    eval_seg.py --model a b --mirror scores the ensemble."""
+    import torch
+    from seg_model import Ensemble, VulvaUNet, load_ensemble, save_checkpoint
+    torch.manual_seed(0)
+    a, b = VulvaUNet(pretrained=False, n_out=3).eval(), VulvaUNet(pretrained=False, n_out=3).eval()
+    x = torch.rand(2, 3, 64, 64)
+    with torch.no_grad():
+        pa, pb = torch.softmax(a(x), 1), torch.softmax(b(x), 1)
+        pe = torch.softmax(Ensemble([a, b])(x), 1)
+        assert torch.allclose(pe, (pa + pb) / 2, atol=1e-5)
+        same = torch.softmax(Ensemble([a, a])(x), 1)
+        assert torch.allclose(same, pa, atol=1e-5)
+        pm = torch.softmax(Ensemble([a], mirror=True)(x), 1)
+        pflip = torch.flip(torch.softmax(a(torch.flip(x, dims=[3])), 1), dims=[3])
+        assert torch.allclose(pm, (pa + pflip) / 2, atol=1e-5)
+    tmp = tempfile.mkdtemp()
+    try:
+        paths = []
+        for k, m in enumerate((a, b, VulvaUNet(pretrained=False, n_out=1).eval())):
+            m.inputs = "ir"
+            paths.append(os.path.join(tmp, f"m{k}.pth"))
+            save_checkpoint(m, paths[-1], {"threshold": 0.5, "min_area": 25, "inputs": "ir",
+                                           "classes": 3 if k < 2 else 2})
+        ens, ck = load_ensemble(paths[:2], "cpu", mirror=True)
+        assert isinstance(ens, Ensemble) and ens.n_out == 3 and ens.mirror and ck["classes"] == 3
+        single, _ = load_ensemble(paths[0], "cpu")
+        assert not isinstance(single, Ensemble)
+        try:
+            load_ensemble([paths[0], paths[2]], "cpu")
+            raise AssertionError("mixed classes were accepted")
+        except ValueError:
+            pass
+        rng = np.random.default_rng(3)
+        folder = os.path.join(tmp, "set", "20260213-09-00-00")
+        os.makedirs(folder)
+        os.makedirs(os.path.join(tmp, "set", "masks"))
+        rows = []
+        for pid in range(2):
+            ts = f"20260213-09-00-{10 + pid:02d}"
+            m = _write_frame(folder, pid, ts, True, rng)
+            cv2.imwrite(os.path.join(tmp, "set", "masks", f"{pid}.png"), m.astype(np.uint8) * 255)
+            rows.append({"ir_path": f"20260213-09-00-00/pig{pid}_ir_vis_{ts}.jpg", "mask_path": f"masks/{pid}.png",
+                         "label": "present", "pig_id": pid, "timestamp_folder": "20260213-09-00-00",
+                         "pig_timestamp": ts, "how": "hand"})
+        labels = os.path.join(tmp, "set", "labels.csv")
+        with open(labels, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        out = subprocess.run([PY, os.path.join(ROOT, "vulva", "eval_seg.py"), "--model", paths[0], paths[1], "--mirror",
+                              "--labels", labels, "--out-dir", os.path.join(tmp, "ev")], capture_output=True,
+                             text=True, cwd=tmp)
+        assert out.returncode == 0, out.stderr[-2000:]
+        with open(os.path.join(tmp, "ev", "eval_report.txt")) as f:
+            first = f.readline()
+        assert " + " in first and "(mirror averaged)" in first
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_seed_table_means_spreads_and_differences():
     """seed_table.py: eval folders named eval_<recipe>_s<seed>_<split> -> per recipe and test the mean and spread
     over seeds, and the difference against the reference recipe next to the larger spread."""
@@ -1817,7 +1880,24 @@ def test_seed_table_means_spreads_and_differences():
             with open(os.path.join(d, "eval_report.txt"), "w") as f:
                 f.write(f"148 labelled frames\nMask mAP50 {m50:.3f}, mAP50-95 {m5095:.3f}  (every outline drawn, "
                         f"ranked by confidence; AP at IoU 0.75 0.180, at 0.90 0.000)\n"
-                        f"Outline on frames both call visible (90): IoU mean 0.700, median 0.710\n")
+                        f"Outline on frames both call visible (90): IoU mean 0.700, median 0.710\n"
+                        f"Width (model minus hand, 93 frames measured on both): bias -{seed % 5 + 5}.5 mm, mean abs 9.0 mm, "
+                        f"median abs 7.6 mm; hand median 48.4 mm\n"
+                        f"Length (model minus hand, 93 frames measured on both): bias -12.2 mm, mean abs 13.5 mm, "
+                        f"median abs 13.0 mm; hand median 86.6 mm\n")
+            if recipe == "ir" and split == "test_newdays":          # per-frame results: frame A found by all, B by
+                found = {"A": 1, "B": int(seed == 42), "C": 0}       # seed 42 only, C by none; D has no vulva
+                with open(os.path.join(d, "eval_frames.csv"), "w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["timestamp_folder", "label", "model_visible_before_cut", "iou", "ir_path"])
+                    for k in "ABC":
+                        w.writerow(["20260212", "present", found[k], 0.7 + seed / 1000 if found[k] else "",
+                                    f"C:\\set\\pig{k}_ir_vis_x.jpg"])
+                    w.writerow(["20260212", "absent", 1, "", "C:\\set\\pigD_ir_vis_x.jpg"])
+        d = os.path.join(tmp, "eval_ir_sens_test_newdays")                   # the three ir seeds as one model
+        os.makedirs(d)
+        with open(os.path.join(d, "eval_report.txt"), "w") as f:
+            f.write("Mask mAP50 0.951, mAP50-95 0.405  (every outline drawn)\n")
         os.makedirs(os.path.join(tmp, "eval_r10_feb"))                  # not in the naming scheme: ignored
         old = sys.argv
         sys.argv = ["seed_table.py", tmp, "--copy-to", os.path.join(tmp, "share")]
@@ -1835,7 +1915,13 @@ def test_seed_table_means_spreads_and_differences():
         assert abs(pfus["map50_95_diff"] + 0.007) < 1e-9
         with open(os.path.join(tmp, "seed_table.csv")) as f:
             rows = list(csv.DictReader(f))
-        assert len(rows) == 8 and {r["ap75"] for r in rows} == {"0.18"} and rows[0]["iou_mean"] == "0.7"
+        assert len(rows) == 9 and {r["ap75"] for r in rows if r["seed"] != "ens"} == {"0.18"}
+        assert ir["ens"]["map50_95"] == 0.405 and ir["seeds"] == [1, 2, 42]           # the ensemble is not a seed
+        assert abs(ir["width_bias_mean"] - (-(6.5 + 7.5 + 7.5) / 3)) < 1e-9 and abs(ir["hand_length_mean"] - 86.6) < 1e-9
+        with open(os.path.join(tmp, "seed_table.txt")) as f:
+            text = f.read()
+        assert "0.405 / 0.951" in text and "hand median 48.4 x 86.6 mm" in text
+        assert "3 visible: all 3 seeds 1, some 1, none 1" in text and "missed by all 3 models: 1: 20260212/pigC_ir_vis_x.jpg" in text
         assert os.path.exists(os.path.join(tmp, "share", "seed_table.txt"))
         assert os.path.exists(os.path.join(tmp, "share", "eval_pre_ir_s1_test_newdays", "eval_report.txt"))
     finally:
