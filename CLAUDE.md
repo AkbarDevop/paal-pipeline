@@ -49,6 +49,7 @@ python vulva/train_seg.py --labels <set>/labels.csv --classes 3 --out-model mode
 python vulva/seed_table.py outputs/seeds                             # seeds: mean, spread, each recipe against its baseline
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e1b_e10.ps1   # lab PC: E1b seeds + E10 fine-tuning, scored, one table
 python vulva/eval_seg.py --model <a.pth> <b.pth> <c.pth> --mirror --labels <dataset>/labels.csv --split test_newdays   # seeds as one model
+powershell -ExecutionPolicy Bypass -File vulva\experiments\e1c_depth.ps1   # lab PC: depth-only seeds + a third fusion seed, scored
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e4_ensemble.ps1   # lab PC: three-seed ensembles + mirror, no training
 python tests/test_vulva_pipeline.py                                  # 44 synthetic checks
 ```
