@@ -12,13 +12,17 @@ E13 on the CAFNR PC (plan, 2026-11-26): the diverse labelling round. From the re
    training frames, seeds 1, 2, 3).
 4. Scores them on Test 1 and Test 2 and prints the table: depth_v2 is compared with depth, fusion_drop_v2 with
    fusion_drop (same recipe, old data). About 1.5 h. Run it again after a stop: finished parts are skipped.
+-WithFusion also trains plain IR + depth (fusion_v2, seeds 1, 2, 3; no IR hidden), to see whether more varied
+training pictures alone make it use depth (compared with fusion). Run with it after the first run: only the three
+new models are trained.
 #>
 param(
     [string]$V1 = "C:\Users\aakdbx\vulva_dataset_v1\labels.csv",
     [string]$V2Dir = "C:\Users\aakdbx\vulva_dataset_v2",
     [string]$NewSets = "diverse_febmar=C:\Users\aakdbx\vulva_diverse_febmar\labels.csv;diverse_jan=C:\Users\aakdbx\vulva_diverse_jan\labels.csv",
     [string]$Out = "outputs\seeds",
-    [string]$Python = ""
+    [string]$Python = "",
+    [switch]$WithFusion
 )
 $ErrorActionPreference = "Continue"
 $t0 = Get-Date
@@ -60,6 +64,13 @@ $plan = @(
     @{ Name = "fusion_drop_v2_s2"; Inputs = "fusion"; Seed = 2; Drop = "0.5" },
     @{ Name = "fusion_drop_v2_s3"; Inputs = "fusion"; Seed = 3; Drop = "0.5" }
 )
+if ($WithFusion) {
+    $plan += @(
+        @{ Name = "fusion_v2_s1"; Inputs = "fusion"; Seed = 1; Drop = "0" },
+        @{ Name = "fusion_v2_s2"; Inputs = "fusion"; Seed = 2; Drop = "0" },
+        @{ Name = "fusion_v2_s3"; Inputs = "fusion"; Seed = 3; Drop = "0" }
+    )
+}
 $train = @()
 foreach ($m in $plan) {
     if (Test-Path "models\seeds\$($m.Name).pth") { Write-Host "  done already: $($m.Name)"; continue }
