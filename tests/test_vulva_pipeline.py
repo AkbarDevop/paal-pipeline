@@ -1970,11 +1970,13 @@ def test_data_summary_counts_days_times_and_stalls():
              "source": "feb"},
             {"split": "train", "label": "absent", "date": "20260206", "hour": "22", "animal_id": "b2_s04",
              "source": "feb"},
-            {"split": "train", "label": "present", "pig_timestamp": "20260124-15-02-11", "pig_id": "6"}]
+            {"split": "train", "label": "present", "pig_timestamp": "20260124-15-02-11", "pig_id": "6",
+             "half_length_px": "26", "half_width_px": "13"}]
     text = "\n".join(summarise(rows))
     assert "3 frames, 2 with a visible vulva, 1 without" in text and "2 days, 20260124 to 20260206" in text
     assert "2026-02: 2 frames on 1 days: 06:2" in text and "night 18-06 1 (33%)" in text
     assert "afternoon 14-18 1" in text and "3 stalls" in text and "s06 1" in text and "from: feb 2" in text
+    assert "hand outline, median length x width (px): all 52.0 x 26.0 (n 1)" in text
 
 
 def test_export_night_per_day_adds_night_frames():

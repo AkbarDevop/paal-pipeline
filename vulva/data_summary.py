@@ -58,6 +58,18 @@ def summarise(rows):
     src = Counter(r.get("source", "") for r in rows if r.get("source"))
     if src:
         lines.append("  from: " + ", ".join(f"{k} {v}" for k, v in src.most_common()))
+    sizes = defaultdict(list)                        # hand ellipses: full length x width in image pixels
+    for r in vis:
+        try:
+            lw = (2 * float(r["half_length_px"]), 2 * float(r["half_width_px"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        sizes[r.get("source", "") or "all"].append(lw)
+    if sizes:
+        med = lambda v: sorted(v)[len(v) // 2]  # noqa: E731
+        lines.append("  hand outline, median length x width (px): " + ", ".join(
+            f"{k} {med([a for a, _ in v]):.1f} x {med([b for _, b in v]):.1f} (n {len(v)})"
+            for k, v in sorted(sizes.items())))
     return lines
 
 
