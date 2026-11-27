@@ -110,6 +110,36 @@ def collect(sources, frames_roots, starts):
     return frames, problems
 
 
+def apply_relabels(frames, paths):
+    """Reviewed rows (label_ellipse.py --review on a make_review_set.py folder) replace the label and ellipse of the
+    same frame (same stall and timestamp); rows without a review mark are left as they were.
+    -> Counter of what happened ("kept", "redrawn", "not visible", "tail", "not in dataset", "mask missing")."""
+    done = Counter()
+    for p in paths:
+        base = os.path.dirname(os.path.abspath(p))
+        with open(p, newline="", encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                rev = (r.get("review") or "").strip()
+                if not rev:
+                    continue
+                fr = frames.get((pig_int(r.get("pig_id")), r.get("pig_timestamp", "")))
+                if fr is None:
+                    done["not in dataset"] += 1
+                    continue
+                present = r.get("label") == "present"
+                mp = r.get("mask_path", "")
+                mp = (mp if os.path.isabs(mp) else os.path.join(base, mp)) if mp else ""
+                if present and not os.path.exists(mp):
+                    done["mask missing"] += 1
+                    continue
+                fr.update({"label": r["label"], "mask_path": mp if present else "", "how": r.get("how") or fr.get("how", ""),
+                           "note": r.get("note", ""), "review": rev,
+                           **{k: (r.get(k, "") if present else "") for k in ("cx", "cy", "half_length_px", "half_width_px",
+                                                                             "angle_deg")}})
+                done[rev.split(" ", 1)[1] if " " in rev else rev] += 1
+    return done
+
+
 def leak_checks(frames):
     """-> (errors, notes). Errors: an animal on the same day in train and in a test split."""
     errors, notes = [], []
@@ -236,6 +266,9 @@ def main():
                     "the train split (named after their folders)")
     ap.add_argument("--from-dataset", default="", help="an earlier dataset table (e.g. vulva_dataset_v1\\labels.csv): every "
                     "split is carried over as it is (same frames, same split, tails and colour), before the --add sets")
+    ap.add_argument("--relabel", action="append", default=[], metavar="LABELS_CSV",
+                    help="reviewed labels from a make_review_set.py folder (label_ellipse.py --review): their label "
+                         "and ellipse replace the dataset's for the same frames; unreviewed rows change nothing")
     ap.add_argument("--frames-root", default="", help="';'-separated raw folders (images not next to the labels)")
     ap.add_argument("--batch-starts", default="2026-02-05", help="comma dates where a new batch of sows starts")
     ap.add_argument("--dry-run", action="store_true", help="check and count only, copy nothing")
@@ -257,6 +290,10 @@ def main():
     if not sources:
         sys.exit("Nothing to build: give --from-dataset, --train-from and/or --add SPLIT NAME LABELS_CSV")
     frames, problems = collect(sources, roots, starts)
+    if args.relabel:
+        changed = apply_relabels(frames, args.relabel)
+        print("relabelled from review: " + (", ".join(f"{v} {k}" for k, v in sorted(changed.items())) or "nothing"))
+        problems += [f"--relabel: {changed[k]} reviewed rows {k}" for k in ("not in dataset", "mask missing") if changed[k]]
     errors, notes = leak_checks(frames)
     errors = problems + errors
     rows, tails, missing = build(args.out_dir, frames, dry=args.dry_run or bool(errors))

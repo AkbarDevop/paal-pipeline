@@ -59,6 +59,8 @@ python vulva/data_summary.py <dataset>/labels.csv --split train   # what the lab
 python vulva/export_label_set.py <predictions.csv> <out> --dates <fixed days> --per-day 2 --night-per-day 1 --windows 00:00-23:59 --exclude <dataset>/labels.csv --rgb   # diverse frames to label
 python vulva/build_dataset.py <v2 dir> --from-dataset <v1>/labels.csv --add train <name> <labels.csv>   # next dataset version, tests unchanged
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e13_v2.ps1   # lab PC: dataset v2 (diverse round), depth + fusion_drop retrained, scored
+python vulva/make_review_set.py <dataset>/labels.csv <out> --splits test_newdays,test_newsows   # older outlines to re-check (label_ellipse.py <out> --review TAG)
+python vulva/build_dataset.py <v3 dir> --from-dataset <v2>/labels.csv --relabel <out>/labels.csv   # reviewed outlines into the next version
 python tests/test_vulva_pipeline.py                                  # 49 synthetic checks
 ```
 

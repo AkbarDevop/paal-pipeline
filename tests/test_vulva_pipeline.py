@@ -1430,6 +1430,39 @@ def test_build_dataset_splits_leak_checks_and_split_guard():
             t3 = list(csv.DictReader(f))
         assert len(t3) == 1 and os.path.exists(os.path.join(ds3, t3[0]["tail_mask_path"]))
         assert all(os.path.exists(os.path.join(ds3, r["ir_path"])) for r in rows3)
+        # review older outlines without touching the dataset, then take the reviewed rows into the next version
+        from make_review_set import make_review_set
+        rv = os.path.join(tmp, "review")
+        picked = make_review_set(os.path.join(ds, "labels.csv"), rv, splits={"test_newdays"})
+        assert len(picked) == 2
+        with open(os.path.join(rv, "label_set.csv")) as f:
+            fs = list(csv.DictReader(f))
+        assert all(os.path.isabs(x["ir_path"]) and os.path.exists(x["ir_path"]) and os.path.exists(x["depth_path"])
+                   for x in fs)
+        with open(os.path.join(rv, "labels.csv")) as f:
+            rl = list(csv.DictReader(f))
+        os.makedirs(os.path.join(rv, "masks"))
+        m = np.zeros((480, 640), np.uint8)
+        cv2.ellipse(m, ((330, 250), (20, 30), 0), 255, -1)
+        cv2.imwrite(os.path.join(rv, "masks", "redrawn.png"), m)
+        rl[0].update({"mask_path": "masks/redrawn.png", "half_length_px": "15", "half_width_px": "10",
+                      "review": "t1 redrawn"})
+        rl[1].update({"label": "absent", "mask_path": "", "review": "t1 not visible"})
+        with open(os.path.join(rv, "labels.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rl[0]))
+            w.writeheader()
+            w.writerows(rl)
+        ds4 = os.path.join(tmp, "ds4")
+        o4 = subprocess.run([PY, tool, ds4, "--from-dataset", os.path.join(ds, "labels.csv"),
+                             "--relabel", os.path.join(rv, "labels.csv")], capture_output=True, text=True, cwd=tmp)
+        assert o4.returncode == 0 and "1 not visible, 1 redrawn" in o4.stdout, o4.stdout[-1500:] + o4.stderr[-1500:]
+        with open(os.path.join(ds4, "labels.csv")) as f:
+            rows4 = {r["pig_timestamp"]: r for r in csv.DictReader(f)}
+        assert rows4[rl[0]["pig_timestamp"]]["half_length_px"] == "15"
+        assert rows4[rl[0]["pig_timestamp"]]["review"] == "t1 redrawn"
+        assert cv2.imread(os.path.join(ds4, rows4[rl[0]["pig_timestamp"]]["mask_path"]), 0).sum() == m.sum()
+        assert rows4[rl[1]["pig_timestamp"]]["label"] == "absent" and rows4[rl[1]["pig_timestamp"]]["mask_path"] == ""
+        assert sum(r["label"] == "present" for r in rows4.values()) == 4          # the train rows are unchanged
         rep = os.path.join(tmp, "seg_report.json")                # train split taken from a run's report
         with open(rep, "w") as f:
             json.dump({"labels": [tr]}, f)
