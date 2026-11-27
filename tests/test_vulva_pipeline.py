@@ -2049,7 +2049,8 @@ def test_seed_table_means_spreads_and_differences():
                 ("ir", 2, "test_newdays"): (0.934, 0.378), ("pre_ir", 42, "test_newdays"): (0.940, 0.400),
                 ("pre_ir", 1, "test_newdays"): (0.936, 0.396), ("ir", 42, "test_newsows"): (0.540, 0.098),
                 ("fusion", 42, "test_newdays"): (0.925, 0.397), ("pre_fusion", 42, "test_newdays"): (0.930, 0.390),
-                ("fusion_m", 42, "test_newdays"): (0.931, 0.401), ("fusion_v2", 42, "test_newdays"): (0.94, 0.41)}
+                ("fusion_m", 42, "test_newdays"): (0.931, 0.401), ("fusion_v2", 42, "test_newdays"): (0.94, 0.41),
+                ("fusion_v3", 42, "test_newdays"): (0.95, 0.42)}
         for (recipe, seed, split), (m50, m5095) in vals.items():
             d = os.path.join(tmp, f"eval_{recipe}_s{seed}_{split}")
             os.makedirs(d)
@@ -2090,10 +2091,11 @@ def test_seed_table_means_spreads_and_differences():
         assert pre["vs"] == "ir" and fus["vs"] == "ir" and pfus["vs"] == "fusion"      # pre_X against X
         assert s["test_newdays"]["fusion_m"]["vs"] == "fusion"                          # X_m (mirror) against X
         assert s["test_newdays"]["fusion_v2"]["vs"] == "fusion"                         # X_v2 against X
+        assert s["test_newdays"]["fusion_v3"]["vs"] == "fusion"
         assert abs(pfus["map50_95_diff"] + 0.007) < 1e-9
         with open(os.path.join(tmp, "seed_table.csv")) as f:
             rows = list(csv.DictReader(f))
-        assert len(rows) == 11 and {r["ap75"] for r in rows if r["seed"] != "ens"} == {"0.18"}
+        assert len(rows) == 12 and {r["ap75"] for r in rows if r["seed"] != "ens"} == {"0.18"}
         assert ir["ens"]["map50_95"] == 0.405 and ir["seeds"] == [1, 2, 42]           # the ensemble is not a seed
         assert abs(ir["width_bias_mean"] - (-(6.5 + 7.5 + 7.5) / 3)) < 1e-9 and abs(ir["hand_length_mean"] - 86.6) < 1e-9
         with open(os.path.join(tmp, "seed_table.txt")) as f:

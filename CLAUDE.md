@@ -61,6 +61,7 @@ python vulva/build_dataset.py <v2 dir> --from-dataset <v1>/labels.csv --add trai
 powershell -ExecutionPolicy Bypass -File vulva\experiments\e13_v2.ps1   # lab PC: dataset v2 (diverse round), depth + fusion_drop retrained, scored
 python vulva/make_review_set.py <dataset>/labels.csv <out> --splits test_newdays,test_newsows   # older outlines to re-check (label_ellipse.py <out> --review TAG)
 python vulva/build_dataset.py <v3 dir> --from-dataset <v2>/labels.csv --relabel <out>/labels.csv   # reviewed outlines into the next version
+powershell -ExecutionPolicy Bypass -File vulva\experiments\e14_v3.ps1   # lab PC: dataset v3 (reviewed outlines), train + score every candidate on the v3 tests
 python tests/test_vulva_pipeline.py                                  # 49 synthetic checks
 ```
 
